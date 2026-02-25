@@ -2,8 +2,9 @@
 Policy Network  π(x)  —  outputs a control action per agent.
 
 Architecture (Table I):
-    Encoder ψ₁ : [edge_dim → 256 → 256 → 128]
+    Encoder ψ₁ : [node_dim*2 + edge_dim → 256 → 256 → 128]
     Attention ψ₂: [128 → 128 → 128 → 1]
+    Value ψ₃   : [128 → 256 → 128]
     Decoder ψ₄ : [128 → 256 → 256 → action_dim]
 """
 
@@ -24,6 +25,8 @@ class PolicyNetwork(nn.Module):
 
     Parameters
     ----------
+    node_dim : int
+        Dimension of per-node features (default 3).
     edge_dim : int
         Dimension of raw edge features (default 4).
     action_dim : int
@@ -38,6 +41,7 @@ class PolicyNetwork(nn.Module):
 
     def __init__(
         self,
+        node_dim: int = 3,
         edge_dim: int = 4,
         action_dim: int = 2,
         n_agents: int = 4,
@@ -49,13 +53,15 @@ class PolicyNetwork(nn.Module):
 
         self.gnn_layers = nn.ModuleList()
         for i in range(n_layers):
-            in_dim = edge_dim if i == 0 else 128
             self.gnn_layers.append(
                 GNNLayer(
-                    edge_dim=in_dim,
+                    node_dim=node_dim,
+                    edge_dim=edge_dim,
                     msg_hid_sizes=(256, 256),
                     msg_out_dim=128,
                     attn_hid_sizes=(128, 128),
+                    value_hid_sizes=(256,),
+                    value_out_dim=128,
                     update_hid_sizes=(256, 256),
                     out_dim=action_dim,
                 )

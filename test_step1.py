@@ -127,8 +127,11 @@ env_test = DoubleIntegrator(
 graph = env_test.reset(seed=123)
 check(f"test graph n_edge > 0", graph.n_edge > 0, f"got {graph.n_edge}")
 
+NODE_DIM = env_test.node_dim  # 3
+EDGE_DIM = env_test.edge_dim  # 4
+
 # 2a. GCBF Network — forward pass
-gcbf = GCBFNetwork(edge_dim=4, n_agents=NUM_AGENTS)
+gcbf = GCBFNetwork(node_dim=NODE_DIM, edge_dim=EDGE_DIM, n_agents=NUM_AGENTS)
 h = gcbf(graph)
 check(
     f"GCBF output shape == ({NUM_AGENTS}, 1)",
@@ -138,7 +141,9 @@ check(
 check("GCBF output is finite", torch.isfinite(h).all().item())
 
 # 2b. Policy Network — forward pass
-policy = PolicyNetwork(edge_dim=4, action_dim=2, n_agents=NUM_AGENTS)
+policy = PolicyNetwork(
+    node_dim=NODE_DIM, edge_dim=EDGE_DIM, action_dim=2, n_agents=NUM_AGENTS
+)
 u = policy(graph)
 check(
     f"Policy output shape == ({NUM_AGENTS}, 2)",
@@ -175,6 +180,19 @@ n_params_gcbf = sum(p.numel() for p in gcbf.parameters())
 n_params_policy = sum(p.numel() for p in policy.parameters())
 print(f"\n  [INFO] GCBF  params: {n_params_gcbf:,}")
 print(f"  [INFO] Policy params: {n_params_policy:,}")
+
+# 2e. Architecture sanity: ψ₁ input dim = node_dim*2 + edge_dim = 10
+psi1_in = gcbf.gnn_layers[0].msg_net.net[0].in_features
+expected_in = NODE_DIM * 2 + EDGE_DIM
+check(
+    f"ψ₁ input dim == {expected_in} (node_dim*2 + edge_dim)",
+    psi1_in == expected_in,
+    f"got {psi1_in}",
+)
+
+# 2f. ψ₃ is a real MLP (not identity)
+psi3_params = sum(p.numel() for p in gcbf.gnn_layers[0].value_net.parameters())
+check("ψ₃ (value_net) has > 0 parameters", psi3_params > 0, f"got {psi3_params}")
 
 # ═══════════════════════════════════════════════════════════════════════
 # Summary
