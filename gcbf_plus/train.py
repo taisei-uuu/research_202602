@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from typing import Dict
 
@@ -42,6 +43,7 @@ def train(
     max_grad_norm: float = 2.0,
     log_interval: int = 50,
     seed: int = 0,
+    checkpoint_path: str = "gcbf_plus_checkpoint.pt",
 ) -> Dict[str, list]:
     """
     Train the GCBF+ networks.
@@ -189,6 +191,26 @@ def train(
     print("=" * 60)
     print(f" Training complete in {time.time() - t_start:.1f}s")
     print("=" * 60)
+
+    # ---- Save checkpoint ----
+    ckpt = {
+        "gcbf_net": gcbf_net.state_dict(),
+        "policy_net": policy_net.state_dict(),
+        "config": {
+            "num_agents": num_agents,
+            "area_size": area_size,
+            "node_dim": env.node_dim,
+            "edge_dim": env.edge_dim,
+            "action_dim": env.action_dim,
+            "comm_radius": env.comm_radius,
+            "n_obs": env.params["n_obs"],
+            "dt": env.dt,
+        },
+        "history": history,
+    }
+    torch.save(ckpt, checkpoint_path)
+    print(f" Checkpoint saved to: {checkpoint_path}")
+
     return history
 
 
@@ -206,8 +228,12 @@ def main():
     parser.add_argument("--eps", type=float, default=0.02)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--checkpoint", type=str, default="gcbf_plus_checkpoint.pt",
+                        help="Path to save the trained checkpoint")
     args = parser.parse_args()
-    train(**vars(args))
+    train_args = vars(args)
+    train_args["checkpoint_path"] = train_args.pop("checkpoint")
+    train(**train_args)
 
 
 if __name__ == "__main__":
