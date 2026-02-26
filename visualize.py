@@ -85,7 +85,7 @@ def load_trained_policy(checkpoint_path: str):
 
     print(f"  Loaded trained policy from: {checkpoint_path}")
     print(f"    agents={cfg['num_agents']}  area={cfg['area_size']}  "
-          f"n_obs={cfg['n_obs']}  dt={cfg['dt']}")
+          f"n_obs={cfg['n_obs']}  dt={cfg['dt']}  comm_radius={cfg['comm_radius']}")
     return policy_net, cfg
 
 
@@ -124,7 +124,10 @@ def run_simulation(
         area_size = cfg["area_size"]
         n_obs = cfg["n_obs"]
         dt = cfg["dt"]
+        comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
+    else:
+        comm_radius = 0.5  # default for LQR mode
 
     # ── Create environment ───────────────────────────────────────────
     env = DoubleIntegrator(
@@ -132,7 +135,7 @@ def run_simulation(
         area_size=area_size,
         dt=dt,
         max_steps=max_steps,
-        params={"n_obs": n_obs},
+        params={"n_obs": n_obs, "comm_radius": comm_radius},
     )
 
     env.reset(seed=seed)
@@ -166,6 +169,11 @@ def run_simulation(
             break
 
     trajectories = np.array(trajectories)  # (T+1, n, 2)
+
+    # Debug: print total displacement
+    displacement = np.linalg.norm(trajectories[-1] - trajectories[0], axis=1)
+    print(f"  Agent displacements: {displacement}")
+
     return trajectories, goals, obstacle_info, area_size, mode
 
 
