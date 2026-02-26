@@ -311,6 +311,24 @@ class DoubleIntegrator:
         """Current goal states (n_agents, 4)."""
         return self._goal_states
 
+    def to(self, device: torch.device) -> "DoubleIntegrator":
+        """
+        Move all internal tensors to *device* (e.g. ``torch.device('cuda')``).
+
+        Returns ``self`` for chaining.
+        """
+        self._K = self._K.to(device)
+        if self._agent_states is not None:
+            self._agent_states = self._agent_states.to(device)
+        if self._goal_states is not None:
+            self._goal_states = self._goal_states.to(device)
+        if self._obstacle_states is not None:
+            self._obstacle_states = self._obstacle_states.to(device)
+        for obs in self._obstacles:
+            obs.center = obs.center.to(device)
+            obs.half_size = obs.half_size.to(device)
+        return self
+
     # ------------------------------------------------------------------
     # Safety masks  (needed by CBF training)
     # ------------------------------------------------------------------

@@ -44,6 +44,7 @@ def train(
     log_interval: int = 50,
     seed: int = 0,
     checkpoint_path: str = "gcbf_plus_checkpoint.pt",
+    device: str = "auto",
 ) -> Dict[str, list]:
     """
     Train the GCBF+ networks.
@@ -55,11 +56,18 @@ def train(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+    # ---- Device ----
+    if device == "auto":
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        dev = torch.device(device)
+    print(f" Device: {dev}")
+
     # ---- Environment ----
     env = DoubleIntegrator(
         num_agents=num_agents,
         area_size=area_size,
-        params={"comm_radius": 1.0, "n_obs": 4},
+        params={"comm_radius": 5.0, "n_obs": 4},
     )
 
     # ---- Networks ----
@@ -67,20 +75,20 @@ def train(
         node_dim=env.node_dim,
         edge_dim=env.edge_dim,
         n_agents=num_agents,
-    )
+    ).to(dev)
     policy_net = PolicyNetwork(
         node_dim=env.node_dim,
         edge_dim=env.edge_dim,
         action_dim=env.action_dim,
         n_agents=num_agents,
-    )
+    ).to(dev)
 
     # ---- Optimizers ----
     optim_cbf = torch.optim.Adam(gcbf_net.parameters(), lr=lr_cbf)
     optim_actor = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
 
     # ---- Dynamics matrices (constant for Double Integrator) ----
-    B_mat = env._B   # (state_dim, action_dim)
+    B_mat = env._B   # (state_dim, action_dim)  — numpy, stays on CPU for QP
 
     # ---- Training history ----
     history: Dict[str, list] = {
@@ -102,6 +110,7 @@ def train(
 
         for _ in range(batch_size):
             env.reset(seed=None)  # fresh random seed each sample
+            env.to(dev)          # move env tensors to GPU
 
             # ---- (2) Build differentiable graph ----
             agent_states = env.agent_states.clone().requires_grad_(True)
@@ -120,7 +129,7 @@ def train(
             safe_m = env.safe_mask()           # (n_agents,) bool
             unsafe_m = env.unsafe_mask()       # (n_agents,) bool
 
-            # ---- (6) QP target (non-differentiable) ----
+            # ---- (6) QP target (non-differentiable, runs on CPU) ----
             u_nom = env.nominal_controller()
             # Drift part of ẋ:  f(x) = [vx, vy, 0, 0]
             x_dot_f = torch.zeros_like(agent_states)
@@ -128,13 +137,13 @@ def train(
 
             with torch.no_grad():
                 u_qp = solve_cbf_qp(
-                    u_nom=u_nom,
-                    h=h.detach(),
-                    dh_dx=dh_dx.detach(),
-                    x_dot_f=x_dot_f,
+                    u_nom=u_nom.cpu(),
+                    h=h.detach().cpu(),
+                    dh_dx=dh_dx.detach().cpu(),
+                    x_dot_f=x_dot_f.cpu(),
                     B_mat=B_mat,
                     alpha=alpha,
-                )
+                ).to(dev)
 
             # ---- (7) Compute loss ----
             loss, info = compute_loss(
@@ -230,6 +239,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="gcbf_plus_checkpoint.pt",
                         help="Path to save the trained checkpoint")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="Device: 'auto' (detect GPU), 'cuda', or 'cpu'")
     args = parser.parse_args()
     train_args = vars(args)
     train_args["checkpoint_path"] = train_args.pop("checkpoint")
