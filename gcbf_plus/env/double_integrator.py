@@ -310,3 +310,108 @@ class DoubleIntegrator:
     def goal_states(self) -> torch.Tensor:
         """Current goal states (n_agents, 4)."""
         return self._goal_states
+
+    # ------------------------------------------------------------------
+    # Safety masks  (needed by CBF training)
+    # ------------------------------------------------------------------
+    def unsafe_mask(self) -> torch.Tensor:
+        """
+        True for each agent that is in collision (with obstacle or another agent).
+
+        Returns : (n_agents,) bool tensor.
+        """
+        n = self.num_agents
+        pos = self._agent_states[:, :2]       # (n, 2)
+        car_r = self.params["car_radius"]
+
+        # Agent–obstacle collision
+        obs_collision = torch.zeros(n, dtype=torch.bool)
+        for obs in self._obstacles:
+            padded_hs = obs.half_size + car_r
+            diff = torch.abs(pos - obs.center.unsqueeze(0))
+            inside = (diff[:, 0] < padded_hs[0]) & (diff[:, 1] < padded_hs[1])
+            obs_collision = obs_collision | inside
+
+        # Agent–agent collision (distance < 2 * car_radius)
+        dists = torch.cdist(pos, pos)         # (n, n)
+        dists = dists + torch.eye(n) * 1e6    # ignore self
+        agent_collision = (dists < 2 * car_r).any(dim=1)
+
+        return obs_collision | agent_collision
+
+    def safe_mask(self) -> torch.Tensor:
+        """True for each agent that is collision-free."""
+        return ~self.unsafe_mask()
+
+    # ------------------------------------------------------------------
+    # Differentiable forward simulation
+    # ------------------------------------------------------------------
+    def forward_step(
+        self, agent_states: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Simulate one Euler step (differentiable, does NOT modify env state).
+
+        Parameters
+        ----------
+        agent_states : (n_agents, 4)  — may have requires_grad=True
+        action       : (n_agents, 2)
+
+        Returns
+        -------
+        next_states : (n_agents, 4)
+        """
+        m = self.params["mass"]
+        dt = self.dt
+        accel = action / m
+        new_pos = agent_states[:, :2] + agent_states[:, 2:] * dt + 0.5 * accel * dt ** 2
+        new_vel = agent_states[:, 2:] + accel * dt
+        return torch.cat([new_pos, new_vel], dim=1)
+
+    def build_graph_differentiable(
+        self, agent_states: torch.Tensor
+    ) -> GraphsTuple:
+        """
+        Build a ``GraphsTuple`` where edge features are differentiable w.r.t.
+        *agent_states*. The graph topology (senders/receivers) is computed
+        with detached positions so that it does not create discrete gradients.
+
+        Parameters
+        ----------
+        agent_states : (n_agents, 4) — may have requires_grad = True.
+
+        Returns
+        -------
+        GraphsTuple whose ``.edges`` carry gradient information.
+        """
+        return build_graph_from_states(
+            agent_states=agent_states,
+            goal_states=self._goal_states,
+            obstacle_positions=self._obstacle_states,
+            comm_radius=self.comm_radius,
+            node_dim=self.node_dim,
+            edge_dim=self.edge_dim,
+        )
+
+    def state_dot(
+        self, agent_states: torch.Tensor, action: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute the continuous-time derivative  ẋ = f(x) + g(x)u.
+
+        For the double integrator:
+            ẋ = [v_x, v_y, a_x/m, a_y/m]
+
+        Parameters
+        ----------
+        agent_states : (n, 4)
+        action       : (n, 2)
+
+        Returns
+        -------
+        x_dot : (n, 4)
+        """
+        m = self.params["mass"]
+        vel = agent_states[:, 2:]           # (n, 2)
+        accel = action / m                  # (n, 2)
+        return torch.cat([vel, accel], dim=1)  # (n, 4)
