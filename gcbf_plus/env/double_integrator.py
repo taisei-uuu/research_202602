@@ -343,7 +343,7 @@ class DoubleIntegrator:
         car_r = self.params["car_radius"]
 
         # Agent–obstacle collision
-        obs_collision = torch.zeros(n, dtype=torch.bool)
+        obs_collision = torch.zeros(n, dtype=torch.bool, device=pos.device)
         for obs in self._obstacles:
             padded_hs = obs.half_size + car_r
             diff = torch.abs(pos - obs.center.unsqueeze(0))
@@ -352,7 +352,7 @@ class DoubleIntegrator:
 
         # Agent–agent collision (distance < 2 * car_radius)
         dists = torch.cdist(pos, pos)         # (n, n)
-        dists = dists + torch.eye(n) * 1e6    # ignore self
+        dists = dists + torch.eye(n, device=pos.device) * 1e6    # ignore self
         agent_collision = (dists < 2 * car_r).any(dim=1)
 
         return obs_collision | agent_collision
