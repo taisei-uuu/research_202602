@@ -62,7 +62,7 @@ def train(
     coef_safe: float = 1.0,
     coef_unsafe: float = 2.0,
     coef_h_dot: float = 0.2,
-    coef_action: float = 1e-4,
+    coef_action: float = 0.01,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -133,6 +133,8 @@ def train(
     print(f"  Training samples per step: {batch_size} × {T_loss} "
           f"= {batch_size * T_loss}")
     print(f"  State=6D  Action=3D  Edge=8D  Nodes/sample={N_per}")
+    print(f"  coef_action={coef_action}  coef_safe={coef_safe}"
+          f"  coef_unsafe={coef_unsafe}  coef_h_dot={coef_h_dot}")
     print("=" * 60)
     t_start = time.time()
 
