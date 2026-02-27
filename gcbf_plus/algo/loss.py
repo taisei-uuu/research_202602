@@ -77,47 +77,55 @@ def compute_loss(
     """
     Compute the total GCBF+ training loss.
 
+    Loss terms are averaged ONLY over their respective label sets
+    (D_C for safe, D_A for unsafe), matching Eq. 20–21 of the paper.
+
     Parameters
     ----------
-    h : (n_agents,)
-        CBF values per agent.
-    h_dot : (n_agents,)
-        Time derivative of CBF per agent.
-    pi_action : (n_agents, action_dim)
-        Policy network output.
-    u_qp : (n_agents, action_dim)
-        QP-solved safe control target.
-    safe_mask : (n_agents,) bool
-        True where agent is in the safe region.
-    unsafe_mask : (n_agents,) bool
-        True where agent is in the unsafe region.
-    alpha, eps : float
-        CBF hyperparameters.
-    coef_safe, coef_unsafe, coef_h_dot, coef_action : float
-        Loss term coefficients.
+    h : (N,) — CBF values (N = total agents across all samples).
+    h_dot : (N,) — Time derivative of CBF.
+    pi_action : (N, action_dim) — Policy network output.
+    u_qp : (N, action_dim) — QP-solved safe control target.
+    safe_mask : (N,) bool — True where agent is in safe set D_C.
+    unsafe_mask : (N,) bool — True where agent is in unsafe set D_A.
+    alpha, eps : float — CBF hyperparameters.
+    coef_safe, coef_unsafe, coef_h_dot, coef_action : float — coefficients.
 
     Returns
     -------
     total_loss : scalar tensor
     info : dict of scalar loss values for logging
     """
-    # ---- L_safe  (Eq. 20a, safe region): h should be > 0 ----
-    # Penalise  ReLU(-h + ε)  for safe agents
-    h_safe = torch.where(safe_mask, h, torch.ones_like(h) * eps * 2)
-    loss_safe = F.relu(-h_safe + eps)
-    n_safe = safe_mask.sum().clamp(min=1)
-    loss_safe = loss_safe.sum() / n_safe
+    safe_mask_f = safe_mask.float()      # (N,)
+    unsafe_mask_f = unsafe_mask.float()  # (N,)
+    n_safe = safe_mask_f.sum()
+    n_unsafe = unsafe_mask_f.sum()
 
-    # ---- L_unsafe  (Eq. 20a, unsafe region): h should be < 0 ----
-    # Penalise  ReLU(h + ε)  for unsafe agents
-    h_unsafe = torch.where(unsafe_mask, h, -torch.ones_like(h) * eps * 2)
-    loss_unsafe = F.relu(h_unsafe + eps)
-    n_unsafe = unsafe_mask.sum().clamp(min=1)
-    loss_unsafe = loss_unsafe.sum() / n_unsafe
+    # ---- L_safe  (Eq. 20a): h(x) > 0 for x ∈ D_C ----
+    # Penalise  ReLU(-h + ε)  averaged over |D_C| only
+    raw_safe = F.relu(-h + eps)  # (N,)
+    if n_safe > 0:
+        loss_safe = (raw_safe * safe_mask_f).sum() / n_safe
+    else:
+        loss_safe = torch.tensor(0.0, device=h.device)
 
-    # ---- L_h_dot  (Eq. 21):  ḣ + α·h ≥ 0 ----
-    # Penalise  ReLU(-ḣ - α·h + ε)
-    loss_h_dot = F.relu(-h_dot - alpha * h + eps).mean()
+    # ---- L_unsafe  (Eq. 20a): h(x) < 0 for x ∈ D_A ----
+    # Penalise  ReLU(h + ε)  averaged over |D_A| only
+    raw_unsafe = F.relu(h + eps)  # (N,)
+    if n_unsafe > 0:
+        loss_unsafe = (raw_unsafe * unsafe_mask_f).sum() / n_unsafe
+    else:
+        loss_unsafe = torch.tensor(0.0, device=h.device)
+
+    # ---- L_h_dot  (Eq. 21):  ḣ + α·h ≥ 0, for labeled states ----
+    # Apply to both safe and unsafe labeled states
+    labeled_mask_f = (safe_mask | unsafe_mask).float()
+    n_labeled = labeled_mask_f.sum()
+    raw_hdot = F.relu(-h_dot - alpha * h + eps)  # (N,)
+    if n_labeled > 0:
+        loss_h_dot = (raw_hdot * labeled_mask_f).sum() / n_labeled
+    else:
+        loss_h_dot = raw_hdot.mean()  # fallback: average all
 
     # ---- L_action  (Eq. 22):  MSE(π(x), u_QP) ----
     loss_action = F.mse_loss(pi_action, u_qp)

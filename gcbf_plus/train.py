@@ -197,7 +197,7 @@ def train(
     alpha: float = 1.0,
     eps: float = 0.02,
     coef_safe: float = 1.0,
-    coef_unsafe: float = 1.0,
+    coef_unsafe: float = 2.0,
     coef_h_dot: float = 0.2,
     coef_action: float = 1e-4,
     max_grad_norm: float = 2.0,

@@ -110,6 +110,7 @@ def run_simulation(
     goals        : np.ndarray, shape (num_agents, 2)
     obstacle_info: list of (center, half_size)
     area_size    : float
+    comm_radius  : float
     mode         : str — "trained_policy" or "lqr"
     """
 
@@ -176,7 +177,7 @@ def run_simulation(
     displacement = np.linalg.norm(trajectories[-1] - trajectories[0], axis=1)
     print(f"  Agent displacements: {displacement}")
 
-    return trajectories, goals, obstacle_info, area_size, mode
+    return trajectories, goals, obstacle_info, area_size, comm_radius, mode
 
 
 def create_video(
@@ -188,6 +189,7 @@ def create_video(
     fps: int = 30,
     skip: int = 1,
     mode: str = "lqr",
+    comm_radius: float = 1.5,
 ):
     """
     Create an MP4 animation of agent trajectories.
@@ -263,6 +265,17 @@ def create_video(
         )
         current_dots.append(dot)
 
+    # ── Sensing radius circles (move with agents) ────────────────────
+    sensing_circles = []
+    for i in range(n_agents):
+        circle = plt.Circle(
+            (0, 0), comm_radius,
+            fill=False, linestyle="--", linewidth=1.0,
+            edgecolor=colors[i], alpha=0.35, zorder=1,
+        )
+        ax.add_patch(circle)
+        sensing_circles.append(circle)
+
     # Step counter + mode label
     mode_label = "Trained Policy π(x)" if mode == "trained_policy" else "LQR Controller"
     step_text = ax.text(
@@ -307,23 +320,29 @@ def create_video(
     )
 
     # ── Animation functions ──────────────────────────────────────────
+    all_dynamic = trail_lines + current_dots + sensing_circles + [step_text]
+
     def init():
         for line in trail_lines:
             line.set_data([], [])
         for dot in current_dots:
             dot.set_data([], [])
+        for i, circ in enumerate(sensing_circles):
+            circ.center = (starts[i, 0], starts[i, 1])
         step_text.set_text("")
-        return trail_lines + current_dots + [step_text]
+        return all_dynamic
 
     def update(frame_idx):
         sim_step = frame_indices[frame_idx]
         for i in range(n_agents):
             trail = trajectories[: sim_step + 1, i, :]
             trail_lines[i].set_data(trail[:, 0], trail[:, 1])
-            current_dots[i].set_data([trajectories[sim_step, i, 0]],
-                                     [trajectories[sim_step, i, 1]])
+            cx = trajectories[sim_step, i, 0]
+            cy = trajectories[sim_step, i, 1]
+            current_dots[i].set_data([cx], [cy])
+            sensing_circles[i].center = (cx, cy)
         step_text.set_text(f"Step {sim_step}/{total_frames - 1}  [{mode_label}]")
-        return trail_lines + current_dots + [step_text]
+        return all_dynamic
 
     # ── Build animation ──────────────────────────────────────────────
     anim = animation.FuncAnimation(
@@ -347,6 +366,7 @@ def plot_trajectories(
     area_size: float,
     save_path: str = "trajectories.png",
     mode: str = "lqr",
+    comm_radius: float = 1.5,
 ):
     """Save a static trajectory plot."""
     n_agents = trajectories.shape[1]
@@ -388,6 +408,16 @@ def plot_trajectories(
         ax.plot(goals[i, 0], goals[i, 1], marker="*", markersize=18,
                 markerfacecolor=colors[i], markeredgecolor="white",
                 markeredgewidth=1.2, zorder=5)
+
+    # ── Sensing radius circles at final position ─────────────────────
+    finals = trajectories[-1]
+    for i in range(n_agents):
+        circle = plt.Circle(
+            (finals[i, 0], finals[i, 1]), comm_radius,
+            fill=False, linestyle="--", linewidth=1.0,
+            edgecolor=colors[i], alpha=0.35, zorder=1,
+        )
+        ax.add_patch(circle)
 
     ax.set_title(f"Multi-Agent Trajectories  ({n_agents} agents, "
                  f"{trajectories.shape[0]-1} steps · {mode_label})",
@@ -444,7 +474,7 @@ def main():
     args = parser.parse_args()
 
     print("Running simulation...")
-    trajectories, goals, obstacle_info, area, mode = run_simulation(
+    trajectories, goals, obstacle_info, area, comm_r, mode = run_simulation(
         num_agents=args.num_agents,
         area_size=args.area_size,
         max_steps=args.max_steps,
@@ -467,6 +497,7 @@ def main():
             fps=args.fps,
             skip=args.skip,
             mode=mode,
+            comm_radius=comm_r,
         )
     else:
         print("Plotting static image...")
@@ -477,6 +508,7 @@ def main():
             area_size=area,
             save_path=args.save,
             mode=mode,
+            comm_radius=comm_r,
         )
 
     if args.png:
@@ -489,6 +521,7 @@ def main():
             area_size=area,
             save_path=png_path,
             mode=mode,
+            comm_radius=comm_r,
         )
 
     print("Done!")
