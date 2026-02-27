@@ -64,7 +64,7 @@ def train(
     coef_h_dot: float = 0.2,
     coef_action: float = 1e-4,
     max_grad_norm: float = 2.0,
-    log_interval: int = 1,
+    log_interval: int = 100,
     seed: int = 0,
     checkpoint_path: str = "gcbf_swarm_checkpoint.pt",
     device: str = "auto",
