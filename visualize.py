@@ -37,7 +37,7 @@ import matplotlib.animation as animation
 import numpy as np
 import torch
 
-from gcbf_plus.env import DoubleIntegrator
+from gcbf_plus.env import DoubleIntegrator, SwarmIntegrator
 from gcbf_plus.nn import GCBFNetwork, PolicyNetwork
 
 
@@ -86,6 +86,8 @@ def load_trained_policy(checkpoint_path: str):
     print(f"  Loaded trained policy from: {checkpoint_path}")
     print(f"    agents={cfg['num_agents']}  area={cfg['area_size']}  "
           f"n_obs={cfg['n_obs']}  dt={cfg['dt']}  comm_radius={cfg['comm_radius']}")
+    if 'state_dim' in cfg:
+        print(f"    state_dim={cfg['state_dim']}  edge_dim={cfg['edge_dim']}")
     return policy_net, cfg
 
 
@@ -117,6 +119,7 @@ def run_simulation(
     # ── Load trained policy if checkpoint given ──────────────────────
     policy_net = None
     mode = "lqr"
+    is_swarm = False
 
     if checkpoint_path is not None:
         policy_net, cfg = load_trained_policy(checkpoint_path)
@@ -127,17 +130,29 @@ def run_simulation(
         dt = cfg["dt"]
         comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
+        # Detect swarm checkpoint (state_dim=6)
+        is_swarm = cfg.get("state_dim", 4) == 6
     else:
         comm_radius = 1.5  # default for LQR mode
 
     # ── Create environment ───────────────────────────────────────────
-    env = DoubleIntegrator(
-        num_agents=num_agents,
-        area_size=area_size,
-        dt=dt,
-        max_steps=max_steps,
-        params={"n_obs": n_obs, "comm_radius": comm_radius},
-    )
+    if is_swarm:
+        R_form = cfg.get("R_form", 0.3)
+        env = SwarmIntegrator(
+            num_agents=num_agents,
+            area_size=area_size,
+            dt=dt,
+            max_steps=max_steps,
+            params={"n_obs": n_obs, "comm_radius": comm_radius, "R_form": R_form},
+        )
+    else:
+        env = DoubleIntegrator(
+            num_agents=num_agents,
+            area_size=area_size,
+            dt=dt,
+            max_steps=max_steps,
+            params={"n_obs": n_obs, "comm_radius": comm_radius},
+        )
 
     env.reset(seed=seed)
 
