@@ -87,14 +87,14 @@ class DoubleIntegrator:
     OBSTACLE = 2
 
     DEFAULT_PARAMS: Dict[str, Any] = {
-        "car_radius": 0.05,
-        "comm_radius": 0.5,       # sensing / communication radius  R
+        "car_radius": 0.15,       # agent radius (collision at 2*r = 0.3)
+        "comm_radius": 1.5,       # sensing / communication radius  R
         "n_rays": 32,             # (reserved for LiDAR extension)
-        "obs_len_range": (0.1, 0.5),
+        "obs_len_range": (0.1, 0.3),
         "n_obs": 8,               # number of random obstacles
         "mass": 0.1,
-        "u_max": 0.1,             # max control input (gives max accel [-1.0, 1.0])
-        "v_max": 0.5,             # max velocity [-0.5, 0.5]
+        "u_max": 0.3,             # max control input (force), gives max accel 3.0
+        "v_max": 1.0,             # max velocity per axis [-1.0, 1.0]
     }
 
     def __init__(

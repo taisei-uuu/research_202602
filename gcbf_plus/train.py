@@ -29,17 +29,17 @@ from gcbf_plus.algo.qp_solver import solve_cbf_qp
 
 def train(
     num_agents: int = 4,
-    area_size: float = 10.0,
+    area_size: float = 2.0,
     num_steps: int = 2000,
     batch_size: int = 8,
-    lr_cbf: float = 3e-5,
-    lr_actor: float = 3e-5,
+    lr_cbf: float = 3e-4,
+    lr_actor: float = 3e-4,
     alpha: float = 1.0,
     eps: float = 0.02,
     coef_safe: float = 1.0,
     coef_unsafe: float = 1.0,
     coef_h_dot: float = 0.2,
-    coef_action: float = 0.001,
+    coef_action: float = 1.0,
     max_grad_norm: float = 2.0,
     log_interval: int = 50,
     seed: int = 0,
@@ -67,7 +67,7 @@ def train(
     env = DoubleIntegrator(
         num_agents=num_agents,
         area_size=area_size,
-        params={"comm_radius": 5.0, "n_obs": 4},
+        params={"comm_radius": 1.5, "n_obs": 2},
     )
 
     # ---- Networks ----
@@ -229,7 +229,7 @@ def train(
 def main():
     parser = argparse.ArgumentParser(description="Train GCBF+")
     parser.add_argument("--num_agents", type=int, default=4)
-    parser.add_argument("--area_size", type=float, default=10.0)
+    parser.add_argument("--area_size", type=float, default=2.0)
     parser.add_argument("--num_steps", type=int, default=2000)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr_cbf", type=float, default=3e-5)

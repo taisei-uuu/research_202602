@@ -91,10 +91,10 @@ def load_trained_policy(checkpoint_path: str):
 
 def run_simulation(
     num_agents: int = 4,
-    area_size: float = 10.0,
+    area_size: float = 2.0,
     max_steps: int = 256,
     dt: float = 0.03,
-    n_obs: int = 8,
+    n_obs: int = 2,
     seed: int = 0,
     checkpoint_path: Optional[str] = None,
 ):
@@ -127,7 +127,7 @@ def run_simulation(
         comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
     else:
-        comm_radius = 0.5  # default for LQR mode
+        comm_radius = 1.5  # default for LQR mode
 
     # ── Create environment ───────────────────────────────────────────
     env = DoubleIntegrator(
@@ -423,10 +423,10 @@ def main():
         description="Visualize multi-agent trajectories (LQR or trained policy)"
     )
     parser.add_argument("--num_agents", type=int, default=4)
-    parser.add_argument("--area_size", type=float, default=10.0)
+    parser.add_argument("--area_size", type=float, default=2.0)
     parser.add_argument("--max_steps", type=int, default=256)
     parser.add_argument("--dt", type=float, default=0.03)
-    parser.add_argument("--n_obs", type=int, default=8)
+    parser.add_argument("--n_obs", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save", type=str, default="trajectories.mp4",
                         help="Output file (.mp4 for video, .png for static)")
