@@ -134,6 +134,8 @@ def run_simulation(
     n_obs: int = 2,
     seed: int = 0,
     checkpoint_path: Optional[str] = None,
+    force_lqr: bool = False,
+    swarm_lqr: bool = False,
 ):
     """
     Run a simulation and record trajectories.
@@ -154,8 +156,9 @@ def run_simulation(
     # ── Load trained policy if checkpoint given ──────────────────────
     policy_net = None
     mode = "lqr"
-    is_swarm = False
+    is_swarm = swarm_lqr  # --swarm_lqr forces swarm mode even without checkpoint
     R_form = 0.3
+    comm_radius = 2.0 if swarm_lqr else 1.5
 
     if checkpoint_path is not None:
         policy_net, cfg = load_trained_policy(checkpoint_path)
@@ -167,8 +170,10 @@ def run_simulation(
         mode = "trained_policy"
         is_swarm = cfg.get("state_dim", 4) == 6
         R_form = cfg.get("R_form", 0.3)
-    else:
-        comm_radius = 1.5
+        if force_lqr:
+            print("  [force_lqr] Ignoring trained policy — using LQR only")
+            policy_net = None
+            mode = "lqr"
 
     # ── Create environment ───────────────────────────────────────────
     if is_swarm:
@@ -642,6 +647,12 @@ def main():
                         help="Path to trained checkpoint (.pt). "
                              "If given, uses the trained policy; "
                              "otherwise uses the LQR controller.")
+    parser.add_argument("--swarm_lqr", action="store_true",
+                        help="Run SwarmIntegrator with LQR only (no checkpoint needed). "
+                             "Useful for testing the swarm environment.")
+    parser.add_argument("--force_lqr", action="store_true",
+                        help="Load checkpoint config but ignore the trained policy; "
+                             "use LQR only. For debugging.")
     args = parser.parse_args()
 
     print("Running simulation...")
@@ -653,6 +664,8 @@ def main():
         n_obs=args.n_obs,
         seed=args.seed,
         checkpoint_path=args.checkpoint,
+        force_lqr=args.force_lqr,
+        swarm_lqr=args.swarm_lqr,
     )
     trajectories, goals, obstacle_info, area, comm_r, mode, is_swarm, R_form, thetas = result
     entity = "swarms" if is_swarm else "agents"
