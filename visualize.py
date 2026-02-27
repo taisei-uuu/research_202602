@@ -155,10 +155,12 @@ def run_simulation(
     # ── Simulate ─────────────────────────────────────────────────────
     for _ in range(max_steps):
         if policy_net is not None:
-            # Use the trained policy π(x)
+            # Use the trained residual policy: action = 2*π(x) + u_ref
             with torch.no_grad():
                 graph = env._get_graph()
-                u = policy_net(graph)  # (n_agents, action_dim)
+                u_ref = env.nominal_controller()
+                pi_raw = policy_net(graph)  # (n_agents, action_dim)
+                u = 2.0 * pi_raw + u_ref
         else:
             # Use LQR nominal controller
             u = env.nominal_controller()
