@@ -1,0 +1,160 @@
+# GCBF+ Implementation Differences: Original (Jax) vs. Our Reimplementation (PyTorch)
+
+This document summarizes the key differences between the **original GCBF+ implementation** (MIT REALM, Jax) and **our PyTorch reimplementation**, including what we preserved faithfully and where we made deliberate modifications.
+
+---
+
+## 1. Overview
+
+| Aspect | Original (Zhang et al.) | Ours |
+|--------|------------------------|------|
+| **Framework** | Jax + Flax | PyTorch |
+| **Parallelism** | `jax.vmap` over environments | Sequential batch loop |
+| **QP Solver** | JaxProxQP (GPU, differentiable) | Analytical KKT closed-form (GPU, batched PyTorch) |
+| **ḣ computation** | Discrete-time finite difference | Continuous-time Lie derivative (autograd) |
+
+---
+
+## 2. Components Faithfully Reproduced
+
+The following components match the original paper (Eqs. 19–22) and official code:
+
+### 2.1 Network Architecture
+- **GCBF network** $h_\theta(x)$: Graph Neural Network (GNN) with message passing, outputting a scalar CBF value per agent.
+- **Policy network** $\pi_\phi(x)$: GNN outputting a control action per agent.
+
+### 2.2 Residual Policy Formulation
+The policy action follows the official formulation:
+
+$$u = 2 \cdot \pi_\phi(x) + u_{\text{ref}}$$
+
+where $u_{\text{ref}}$ is the nominal LQR controller. The policy network learns only a **residual correction** on top of the goal-seeking controller. The factor of 2 allows the network to override $u_{\text{ref}}$ when needed for safety.
+
+### 2.3 Forward Rollout for Safe/Unsafe Labeling
+Training data is labeled by **forward simulation** using the current policy $\pi_\phi$ over a look-ahead horizon $H$ (default: 16 steps):
+
+- **Unsafe** ($\mathcal{D}_\mathcal{A}$): Agent $i$ at time $t$ is labeled unsafe if it is in a collision state at time $t$:
+$$\text{unsafe}_i(t) = \mathbb{1}[\text{collision at } t]$$
+
+- **Safe** ($\mathcal{D}_\mathcal{C}$): Agent $i$ at time $t$ is labeled safe only if it remained collision-free for the **entire look-back window** $[\max(0, t - H), \, t]$:
+$$\text{safe}_i(t) = \mathbb{1}\left[\forall s \in [\max(0, t-H), t]: \neg \text{unsafe}_i(s)\right]$$
+
+This rollout-based labeling is critical because it allows the CBF to learn that states *near* danger (which lead to future collisions under the current policy) should have low $h$ values, even if the agent is not currently colliding.
+
+### 2.4 Loss Function (Eqs. 19–22)
+
+The composite loss is:
+
+$$\mathcal{L} = c_{\text{safe}} \cdot \mathcal{L}_{\text{safe}} + c_{\text{unsafe}} \cdot \mathcal{L}_{\text{unsafe}} + c_{\dot{h}} \cdot \mathcal{L}_{\dot{h}} + c_{\text{action}} \cdot \mathcal{L}_{\text{action}}$$
+
+| Loss term | Definition | Purpose |
+|-----------|-----------|---------|
+| $\mathcal{L}_{\text{safe}}$ | $\frac{1}{|\mathcal{D}_\mathcal{C}|} \sum_{x \in \mathcal{D}_\mathcal{C}} \max(0, -h(x) + \varepsilon)$ | Enforce $h(x) > 0$ in safe regions |
+| $\mathcal{L}_{\text{unsafe}}$ | $\frac{1}{|\mathcal{D}_\mathcal{A}|} \sum_{x \in \mathcal{D}_\mathcal{A}} \max(0, h(x) + \varepsilon)$ | Enforce $h(x) < 0$ in unsafe regions |
+| $\mathcal{L}_{\dot{h}}$ | $\text{mean}\left[\max(0, -\dot{h} - \alpha h + \varepsilon)\right]$ | Enforce forward invariance $\dot{h} + \alpha h \geq 0$ |
+| $\mathcal{L}_{\text{action}}$ | $\text{mean}\left[\|u_\pi - u_{\text{QP}}\|^2\right]$ | Imitate the safe QP controller |
+
+---
+
+## 3. Deliberate Modifications
+
+### 3.1 Lie Derivative (Continuous-time ḣ) instead of Finite Difference
+
+| | Original (Jax) | Ours (PyTorch) |
+|---|---|---|
+| **Method** | $\dot{h} \approx \frac{h(x') - h(x)}{\Delta t}$ | $\dot{h} = \frac{\partial h}{\partial x} \cdot \dot{x}$ |
+| **Mechanism** | Forward-simulate one step, evaluate $h$ at next state | `torch.autograd.grad` with `create_graph=True` |
+
+**Reasoning:** PyTorch's autograd provides the **exact analytical gradient** $\frac{\partial h}{\partial x}$, making the Lie derivative computation mathematically precise. The original Jax code uses finite differences because Jax's functional transformation style (`jax.vmap`, `jax.lax.scan`) makes forward simulation more natural than computing per-sample gradients. In PyTorch, autograd is the idiomatic and more accurate approach.
+
+**Advantage:** The Lie derivative is independent of the discretization step size $\Delta t$, avoiding numerical errors that arise in the finite-difference approximation when $\Delta t$ is large or the dynamics are stiff.
+
+### 3.2 Analytical KKT QP Solver instead of JaxProxQP
+
+The original code uses **JaxProxQP**, a GPU-accelerated iterative QP solver. We replace it with a **closed-form analytical solution** derived from the KKT conditions.
+
+#### Problem Formulation (per agent $i$)
+
+$$\min_{u_i} \quad \frac{1}{2} \|u_i - u_{\text{nom},i}\|^2$$
+$$\text{s.t.} \quad L_g h_i \cdot u_i + L_f h_i + \alpha \, h_i \geq 0$$
+$$\quad\quad\;\; -u_{\max} \leq u_i \leq u_{\max}$$
+
+where the Lie derivative components are:
+
+$$L_g h_i = \frac{\partial h}{\partial x_i} \cdot g(x_i), \qquad L_f h_i = \frac{\partial h}{\partial x_i} \cdot f(x_i)$$
+
+#### KKT Closed-Form Solution
+
+Since the CBF constraint is a **single linear inequality**, the unconstrained QP is equivalent to projecting $u_{\text{nom}}$ onto a half-space. Applying the KKT conditions:
+
+**Step 1:** Evaluate the constraint at $u_{\text{nom}}$:
+$$c_i = L_g h_i \cdot u_{\text{nom},i} + L_f h_i + \alpha \, h_i$$
+
+**Step 2:** Compute the dual variable:
+$$\lambda_i = \max\!\left(0, \; \frac{-c_i}{\|L_g h_i\|^2}\right)$$
+
+**Step 3:** Compute the optimal action:
+$$u_i^* = u_{\text{nom},i} + \lambda_i \cdot L_g h_i^\top$$
+
+**Step 4 (box constraints):** Clip to input bounds and, if the CBF constraint is violated after clipping, apply iterative projected correction (≤10 gradient-ascent steps on the dual).
+
+#### Implementation (batched PyTorch)
+
+All agents are solved **simultaneously** with no Python loops:
+
+```python
+c       = (Lg_h * u_nom).sum(-1) + Lf_h + alpha * h       # (n_agents,)
+lam     = torch.relu(-c / (Lg_h_norm_sq + 1e-8))           # (n_agents,)
+u_qp    = u_nom + lam.unsqueeze(-1) * Lg_h                 # (n_agents, action_dim)
+u_qp    = torch.clamp(u_qp, -u_max, u_max)                 # box constraint
+```
+
+**Advantages over JaxProxQP:**
+- **No external dependency** — pure PyTorch tensor operations
+- **Exact solution** — no iterative convergence needed for the unconstrained case
+- **GPU-native** — all operations are batched and run on the same device as the training graph
+- **No Python-level loops** — solves all agents in a single vectorized pass
+
+### 3.3 Environment & Hyperparameter Differences
+
+| Parameter | Original Paper | Our Implementation | Reason |
+|-----------|---------------|-------------------|--------|
+| `area_size` | 4.0 | 2.0 | Ensures meaningful collision probability with fewer agents |
+| `car_radius` | 0.15 (default) | 0.15 | Matched |
+| `horizon` | 32 | 16 | Reduced for computational efficiency |
+| `batch_size` | 16 envs (vmapped) | 256 (sequential) | Sequential loop, but large batch for stable gradients |
+| `n_env_train` | 16 (parallel) | 1 (sequential) | No Jax vmap; compensated with larger batch |
+| `inner_epoch` | 8 | 1 | Simplified; may revisit |
+| `replay_buffer` | Yes (with unsafe oversampling) | No | Simplified; may revisit |
+| `target CBF network` | Yes (soft update, τ=0.5) | No | Simplified; may revisit |
+
+---
+
+## 4. Components Not Yet Implemented
+
+The following features from the original code are **not currently implemented** but could be added for improved performance:
+
+| Feature | Purpose | Impact |
+|---------|---------|--------|
+| **Replay buffer** with unsafe oversampling | Ensures the CBF sees enough unsafe data even when collisions are rare | Improves CBF boundary accuracy |
+| **Inner epochs** (8 gradient steps per rollout) | More gradient updates per collected rollout | Better sample efficiency |
+| **Target CBF network** (soft Polyak update) | Stabilizes QP target generation | Prevents oscillations in training |
+| **Attention-based GNN** | Satisfies GCBF theoretical assumptions | Better scalability to many agents |
+
+---
+
+## 5. File Structure
+
+```
+gcbf_plus/
+├── env/
+│   └── double_integrator.py    # Environment with constraints (u_max, v_max)
+├── nn/
+│   └── gnn.py                  # GCBFNetwork + PolicyNetwork (GNN)
+├── algo/
+│   ├── loss.py                 # Loss functions + Lie derivative
+│   ├── qp_solver.py            # Original cvxpy solver (deprecated)
+│   └── qp_solver_torch.py      # NEW: Analytical KKT solver (pure PyTorch)
+└── train.py                    # Training loop with rollout labeling
+visualize.py                    # Trajectory visualization (MP4/PNG)
+```
