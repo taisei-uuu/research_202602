@@ -201,7 +201,7 @@ def train(
     coef_h_dot: float = 0.2,
     coef_action: float = 1e-4,
     max_grad_norm: float = 2.0,
-    log_interval: int = 50,
+    log_interval: int = 1,
     seed: int = 0,
     checkpoint_path: str = "gcbf_plus_checkpoint.pt",
     device: str = "auto",
@@ -480,7 +480,7 @@ def main():
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--eps", type=float, default=0.02)
-    parser.add_argument("--log_interval", type=int, default=50)
+    parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="gcbf_plus_checkpoint.pt",
                         help="Path to save the trained checkpoint")
