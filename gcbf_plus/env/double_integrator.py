@@ -93,8 +93,8 @@ class DoubleIntegrator:
         "obs_len_range": (0.1, 0.5),
         "n_obs": 8,               # number of random obstacles
         "mass": 0.1,
-        "u_max": 2.0,             # max control input (force)
-        "v_max": 2.0,             # max velocity
+        "u_max": 0.1,             # max control input (gives max accel [-1.0, 1.0])
+        "v_max": 0.5,             # max velocity [-0.5, 0.5]
     }
 
     def __init__(
@@ -281,9 +281,7 @@ class DoubleIntegrator:
 
         v_max = self.params.get("v_max")
         if v_max is not None:
-            speed = torch.norm(new_vel, dim=-1, keepdim=True)
-            scale = torch.clamp(v_max / (speed + 1e-8), max=1.0)
-            new_vel = new_vel * scale
+            new_vel = torch.clamp(new_vel, -v_max, v_max)
 
         self._agent_states = torch.cat([new_pos, new_vel], dim=1)
         self._step_count += 1
@@ -419,9 +417,7 @@ class DoubleIntegrator:
         
         v_max = self.params.get("v_max")
         if v_max is not None:
-            speed = torch.norm(new_vel, dim=-1, keepdim=True)
-            scale = torch.clamp(v_max / (speed + 1e-8), max=1.0)
-            new_vel = new_vel * scale
+            new_vel = torch.clamp(new_vel, -v_max, v_max)
             
         return torch.cat([new_pos, new_vel], dim=1)
 
