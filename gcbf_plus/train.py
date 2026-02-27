@@ -336,8 +336,8 @@ def train(
         # ============================================================
         # PHASE 4: Compute u_ref, action, Lie derivative (all batched)
         # ============================================================
-        # agent_states_grad reshaped: (S * n_agents, 4)
-        states_flat = agent_states_grad.reshape(-1, 4)  # (S*n, 4)
+        # Flatten agent states for vectorized ops
+        states_flat = agent_states_grad.reshape(-1, 4)  # (S*n, 4)  — view of leaf
         goals_flat = torch.stack(all_goal_states).reshape(-1, 4)  # (S*n, 4)
 
         # u_ref = -K (x - x_goal), clamped
@@ -358,7 +358,18 @@ def train(
         x_dot = torch.cat([vel, accel], dim=1)  # (S*n, 4)
 
         # ONE Lie derivative computation
-        h_dot, dh_dx = compute_lie_derivative(h_agents, states_flat, x_dot)
+        # IMPORTANT: differentiate w.r.t. agent_states_grad (the leaf tensor
+        # that was used to build the graph), NOT states_flat (a post-hoc view)
+        dh_dx_3d = torch.autograd.grad(
+            outputs=h_agents.sum(),
+            inputs=agent_states_grad,
+            create_graph=True,
+            retain_graph=True,
+        )[0]  # (S, n_agents, 4)
+        dh_dx = dh_dx_3d.reshape(-1, 4)  # (S*n, 4)
+
+        # ḣ = (∂h/∂x) · ẋ
+        h_dot = (dh_dx * x_dot).sum(dim=-1)  # (S*n,)
 
         # ============================================================
         # PHASE 5: ONE batched QP solve
