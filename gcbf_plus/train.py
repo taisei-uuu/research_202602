@@ -30,7 +30,7 @@ import torch
 from gcbf_plus.env import DoubleIntegrator
 from gcbf_plus.nn import GCBFNetwork, PolicyNetwork
 from gcbf_plus.algo.loss import compute_lie_derivative, compute_loss
-from gcbf_plus.algo.qp_solver import solve_cbf_qp
+from gcbf_plus.algo.qp_solver_torch import solve_cbf_qp_batched
 
 
 # ── Helper: compute the full policy action (residual formulation) ────
@@ -169,8 +169,8 @@ def train(
     optim_cbf = torch.optim.Adam(gcbf_net.parameters(), lr=lr_cbf)
     optim_actor = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
 
-    # ---- Dynamics matrices (constant for Double Integrator) ----
-    B_mat = env.g_x_matrix   # (state_dim, action_dim)  — numpy, for QP
+    # ---- Dynamics matrix as torch tensor (constant for Double Integrator) ----
+    B_mat = torch.tensor(env.g_x_matrix, dtype=torch.float32, device=dev)
 
     # ---- Training history ----
     history: Dict[str, list] = {
@@ -231,21 +231,21 @@ def train(
                 x_dot = env.state_dot(states_t, action_t)  # (n, 4)
                 h_dot, dh_dx = compute_lie_derivative(h_t, states_t, x_dot)
 
-                # ---- (5) QP target (non-differentiable, runs on CPU) ----
+                # ---- (5) QP target (batched, on-device, no cvxpy) ----
                 with torch.no_grad():
                     # Drift part of ẋ:  f(x) = [vx, vy, 0, 0]
                     x_dot_f = torch.zeros_like(states_t)
                     x_dot_f[:, :2] = states_t[:, 2:].detach()
 
-                    u_qp = solve_cbf_qp(
-                        u_nom=u_ref_t.cpu(),
-                        h=h_t.detach().cpu(),
-                        dh_dx=dh_dx.detach().cpu(),
-                        x_dot_f=x_dot_f.cpu(),
+                    u_qp = solve_cbf_qp_batched(
+                        u_nom=u_ref_t,
+                        h=h_t.detach(),
+                        dh_dx=dh_dx.detach(),
+                        x_dot_f=x_dot_f,
                         B_mat=B_mat,
                         alpha=alpha,
                         u_max=env.params.get("u_max"),
-                    ).to(dev)
+                    )
 
                 # ---- (6) Compute loss ----
                 loss_t, info_t = compute_loss(
