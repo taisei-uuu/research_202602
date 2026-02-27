@@ -93,6 +93,8 @@ class DoubleIntegrator:
         "obs_len_range": (0.1, 0.5),
         "n_obs": 8,               # number of random obstacles
         "mass": 0.1,
+        "u_max": 2.0,             # max control input (force)
+        "v_max": 2.0,             # max velocity
     }
 
     def __init__(
@@ -169,6 +171,18 @@ class DoubleIntegrator:
     @property
     def comm_radius(self) -> float:
         return self.params["comm_radius"]
+
+    @property
+    def g_x_matrix(self) -> np.ndarray:
+        """Continuous-time control input matrix g(x)."""
+        m = self.params.get("mass", 0.1)
+        return np.array(
+            [[0.0, 0.0],
+             [0.0, 0.0],
+             [1.0 / m, 0.0],
+             [0.0, 1.0 / m]],
+            dtype=np.float32,
+        )
 
     # ------------------------------------------------------------------
     # Reset
@@ -252,6 +266,10 @@ class DoubleIntegrator:
         info  : dict        — contains ``done``, ``step``.
         """
         assert action.shape == (self.num_agents, self.action_dim)
+        
+        u_max = self.params.get("u_max")
+        if u_max is not None:
+            action = torch.clamp(action, -u_max, u_max)
 
         x = self._agent_states
         m = self.params["mass"]
@@ -260,6 +278,12 @@ class DoubleIntegrator:
         accel = action / m                     # a = F / m
         new_pos = x[:, :2] + x[:, 2:] * dt + 0.5 * accel * dt ** 2
         new_vel = x[:, 2:] + accel * dt
+
+        v_max = self.params.get("v_max")
+        if v_max is not None:
+            speed = torch.norm(new_vel, dim=-1, keepdim=True)
+            scale = torch.clamp(v_max / (speed + 1e-8), max=1.0)
+            new_vel = new_vel * scale
 
         self._agent_states = torch.cat([new_pos, new_vel], dim=1)
         self._step_count += 1
@@ -282,6 +306,9 @@ class DoubleIntegrator:
         """
         error = self._agent_states - self._goal_states  # (n, 4)
         u_ref = -error @ self._K.T                       # (n, 2)
+        u_max = self.params.get("u_max")
+        if u_max is not None:
+            u_ref = torch.clamp(u_ref, -u_max, u_max)
         return u_ref
 
     # ------------------------------------------------------------------
@@ -381,9 +408,21 @@ class DoubleIntegrator:
         """
         m = self.params["mass"]
         dt = self.dt
+        
+        u_max = self.params.get("u_max")
+        if u_max is not None:
+            action = torch.clamp(action, -u_max, u_max)
+            
         accel = action / m
         new_pos = agent_states[:, :2] + agent_states[:, 2:] * dt + 0.5 * accel * dt ** 2
         new_vel = agent_states[:, 2:] + accel * dt
+        
+        v_max = self.params.get("v_max")
+        if v_max is not None:
+            speed = torch.norm(new_vel, dim=-1, keepdim=True)
+            scale = torch.clamp(v_max / (speed + 1e-8), max=1.0)
+            new_vel = new_vel * scale
+            
         return torch.cat([new_pos, new_vel], dim=1)
 
     def build_graph_differentiable(
@@ -430,6 +469,10 @@ class DoubleIntegrator:
         x_dot : (n, 4)
         """
         m = self.params["mass"]
+        u_max = self.params.get("u_max")
+        if u_max is not None:
+            action = torch.clamp(action, -u_max, u_max)
+            
         vel = agent_states[:, 2:]           # (n, 2)
         accel = action / m                  # (n, 2)
         return torch.cat([vel, accel], dim=1)  # (n, 4)

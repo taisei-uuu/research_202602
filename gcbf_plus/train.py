@@ -88,7 +88,7 @@ def train(
     optim_actor = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
 
     # ---- Dynamics matrices (constant for Double Integrator) ----
-    B_mat = env._B   # (state_dim, action_dim)  — numpy, stays on CPU for QP
+    B_mat = env.g_x_matrix   # (state_dim, action_dim)  — numpy, stays on CPU for QP
 
     # ---- Training history ----
     history: Dict[str, list] = {
@@ -143,6 +143,7 @@ def train(
                     x_dot_f=x_dot_f.cpu(),
                     B_mat=B_mat,
                     alpha=alpha,
+                    u_max=env.params.get("u_max"),
                 ).to(dev)
 
             # ---- (7) Compute loss ----
