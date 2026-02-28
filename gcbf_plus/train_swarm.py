@@ -50,14 +50,14 @@ def train(
     num_steps: int = 10000,
     batch_size: int = 256,
     horizon: int = 32,
-    lr_cbf: float = 1e-4,
-    lr_actor: float = 1e-4,
+    lr_cbf: float = 1e-5,
+    lr_actor: float = 1e-5,
     alpha: float = 1.0,
     eps: float = 0.02,
     coef_safe: float = 1.0,
     coef_unsafe: float = 2.0,
     coef_h_dot: float = 0.2,
-    coef_action: float = 0.01,
+    coef_action: float = 0.5,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -313,11 +313,11 @@ def main():
     parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=32)
-    parser.add_argument("--lr_cbf", type=float, default=1e-4)
-    parser.add_argument("--lr_actor", type=float, default=1e-4)
+    parser.add_argument("--lr_cbf", type=float, default=1e-5)
+    parser.add_argument("--lr_actor", type=float, default=1e-5)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--eps", type=float, default=0.02)
-    parser.add_argument("--coef_action", type=float, default=0.01)
+    parser.add_argument("--coef_action", type=float, default=0.5)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="gcbf_swarm_checkpoint.pt")
