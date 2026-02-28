@@ -46,6 +46,7 @@ def extract_agent_outputs(
 def train(
     num_agents: int = 3,
     area_size: float = 4.0,
+    n_obs: int = 6,
     num_steps: int = 10000,
     batch_size: int = 256,
     horizon: int = 32,
@@ -74,7 +75,6 @@ def train(
     print(f"  Device: {dev}")
 
     # ---- Env ----
-    n_obs = 2
     vec_env = VectorizedSwarmEnv(
         num_agents=num_agents,
         batch_size=batch_size,
@@ -309,6 +309,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train GCBF+ Swarm (4D bounding circle)")
     parser.add_argument("--num_agents", type=int, default=3)
     parser.add_argument("--area_size", type=float, default=4.0)
+    parser.add_argument("--n_obs", type=int, default=6)
     parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=32)
