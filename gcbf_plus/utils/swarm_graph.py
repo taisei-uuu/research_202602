@@ -1,11 +1,11 @@
 """
-Swarm-aware graph building with drone-to-drone sensing.
+Simplified swarm graph building — Bounding Circle approach.
 
-Edge creation:  For agent-agent edges, compute 3×3=9 pairwise distances
-between constituent drones.  An edge exists iff min(9_dist) < R_sensing.
+Each swarm is treated as a point mass with a bounding circle of radius
+r_swarm.  No rotation, no 9-point drone distances.
 
-Edge features (8D):
-    [Δpx, Δpy, Δvx, Δvy, Δθ_wrapped, min_dist, closest_dx, closest_dy]
+Edge creation:  CoM distance < R_sensing
+Edge features (4D):  [Δpx, Δpy, Δvx, Δvy]
 """
 
 from __future__ import annotations
@@ -18,86 +18,13 @@ import torch
 from .graph import GraphsTuple
 
 
-# ------------------------------------------------------------------
-# Rotation helpers
-# ------------------------------------------------------------------
-
-def _rotation_matrix(theta: torch.Tensor) -> torch.Tensor:
-    """
-    Build 2×2 rotation matrices from angles.
-
-    Parameters
-    ----------
-    theta : (*batch,)
-
-    Returns
-    -------
-    R : (*batch, 2, 2)
-    """
-    c = torch.cos(theta)
-    s = torch.sin(theta)
-    R = torch.stack([
-        torch.stack([c, -s], dim=-1),
-        torch.stack([s,  c], dim=-1),
-    ], dim=-2)
-    return R
-
-
-def _compute_drone_positions(
-    com_pos: torch.Tensor,
-    theta: torch.Tensor,
-    local_offsets: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Compute global positions of the 3 drones in each swarm.
-
-    Parameters
-    ----------
-    com_pos : (N, 2)  — CoM positions
-    theta   : (N,)    — yaw angles
-    local_offsets : (3, 2) — local drone offsets (equilateral triangle)
-
-    Returns
-    -------
-    drone_pos : (N, 3, 2) — global positions of each drone
-    """
-    R = _rotation_matrix(theta)          # (N, 2, 2)
-    # Rotate offsets: (N, 2, 2) @ (3, 2).T → broadcast via einsum
-    # rotated_offsets[i, k, :] = R[i] @ offsets[k]
-    rotated = torch.einsum("nij,kj->nki", R, local_offsets)  # (N, 3, 2)
-    drone_pos = com_pos.unsqueeze(1) + rotated               # (N, 3, 2)
-    return drone_pos
-
-
 def _wrap_angle(a: torch.Tensor) -> torch.Tensor:
-    """Wrap angle to [-π, π]."""
+    """Wrap angle to [-π, π].  (Kept for backward compat, rarely used now.)"""
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 # ------------------------------------------------------------------
-# Local offsets for equilateral triangle
-# ------------------------------------------------------------------
-
-def get_equilateral_offsets(R_form: float, device: torch.device) -> torch.Tensor:
-    """
-    Return (3, 2) local offsets for drones at vertices of an equilateral
-    triangle with circumradius R_form.
-    """
-    s32 = math.sqrt(3.0) / 2.0
-    offsets = torch.tensor(
-        [
-            [R_form, 0.0],
-            [-R_form / 2.0,  R_form * s32],
-            [-R_form / 2.0, -R_form * s32],
-        ],
-        dtype=torch.float32,
-        device=device,
-    )
-    return offsets
-
-
-# ------------------------------------------------------------------
-# Main graph builder
+# Per-sample graph builder (used by SwarmIntegrator / visualize.py)
 # ------------------------------------------------------------------
 
 def build_swarm_graph_from_states(
@@ -106,29 +33,26 @@ def build_swarm_graph_from_states(
     obstacle_positions: Optional[torch.Tensor],
     comm_radius: float,
     node_dim: int = 3,
-    edge_dim: int = 8,
-    R_form: float = 0.3,
+    edge_dim: int = 4,
 ) -> GraphsTuple:
     """
-    Build a ``GraphsTuple`` for swarm agents with drone-to-drone sensing.
+    Build a GraphsTuple for swarm agents using CoM-based bounding circles.
 
     Parameters
     ----------
-    agent_states : (n_agents, 6)  — [px, py, vx, vy, θ, ω]
-    goal_states  : (n_agents, 6)  — [px, py, vx, vy, θ_goal, ω_goal]
-    obstacle_positions : (n_obs, 6) or None
-    comm_radius : float — R_sensing for drone-to-drone edge creation
-    node_dim : int — one-hot node indicator dimension (default 3)
-    edge_dim : int — edge feature dimension (default 8)
-    R_form : float — formation circumradius
+    agent_states : (n_agents, 4)  — [px, py, vx, vy]
+    goal_states  : (n_agents, 4)
+    obstacle_positions : (n_obs, 4) or None
+    comm_radius : float
+    node_dim : int (default 3)
+    edge_dim : int (default 4)
 
     Returns
     -------
-    GraphsTuple with 8D edge features using drone-to-drone sensing.
+    GraphsTuple with 4D edge features.
     """
     n_agents = agent_states.shape[0]
     device = agent_states.device
-    local_offsets = get_equilateral_offsets(R_form, device)  # (3, 2)
 
     # ---- Collect all nodes ----
     all_states = [agent_states, goal_states]
@@ -145,8 +69,8 @@ def build_swarm_graph_from_states(
             torch.full((n_obs,), 2, dtype=torch.long, device=device)
         )
 
-    all_states_cat = torch.cat(all_states, dim=0)  # (N_total, 6)
-    node_type_vec = torch.cat(node_types, dim=0)    # (N_total,)
+    all_states_cat = torch.cat(all_states, dim=0)   # (N_total, 4)
+    node_type_vec = torch.cat(node_types, dim=0)
     n_total = all_states_cat.shape[0]
 
     # ---- One-hot node features ----
@@ -154,166 +78,61 @@ def build_swarm_graph_from_states(
     for t in range(node_dim):
         node_feats[node_type_vec == t, t] = 1.0
 
-    # ---- Compute drone positions for all agents ----
-    agent_pos = agent_states[:, :2]     # (n_agents, 2)
-    agent_theta = agent_states[:, 4]    # (n_agents,)
-    agent_drone_pos = _compute_drone_positions(
-        agent_pos, agent_theta, local_offsets
-    )  # (n_agents, 3, 2)
+    # ---- All-to-agent edges (CoM distance) ----
+    agent_pos = agent_states[:, :2]                        # (n, 2)
+    all_pos = all_states_cat[:, :2]                        # (N, 2)
+    diff = all_pos.unsqueeze(1) - agent_pos.unsqueeze(0)   # (N, n, 2)
+    dist = torch.norm(diff, dim=-1)                        # (N, n)
 
-    # ==================================================================
-    # Agent-to-Agent edges (drone-to-drone sensing)
-    # ==================================================================
-    senders_list = []
-    receivers_list = []
-    edge_feats_list = []
+    mask = dist <= comm_radius
+    # Remove self-loops (agent→itself)
+    for i in range(n_agents):
+        mask[i, i] = False
 
-    if n_agents > 1:
-        # Pairwise drone distances: (n_agents, n_agents, 3, 3)
-        # drone_pos_i[i, k] vs drone_pos_j[j, l]
-        # Expand: (n, 1, 3, 2) - (1, n, 3, 2) → (n, n, 3, 3, 2)
-        diff_all = (
-            agent_drone_pos[:, None, :, None, :]    # (n, 1, 3, 1, 2)
-            - agent_drone_pos[None, :, None, :, :]  # (1, n, 1, 3, 2)
-        )  # (n, n, 3, 3, 2)
-        dist_all = torch.norm(diff_all, dim=-1)  # (n, n, 3, 3)
+    s_idx, r_idx = torch.where(mask)
 
-        # Min over the 9 pairs → (n, n)
-        dist_min, flat_idx = dist_all.reshape(n_agents, n_agents, -1).min(dim=-1)
-        # flat_idx ∈ [0, 8] → unravel to (k_closest, l_closest)
-        k_closest = flat_idx // 3  # which drone in swarm i
-        l_closest = flat_idx % 3   # which drone in swarm j
-
-        # Edge mask: within comm_radius, no self-loops
-        mask = dist_min <= comm_radius
-        mask.fill_diagonal_(False)
-
-        sender_idx, receiver_idx = torch.where(mask)  # (E_aa,)
-
-        if sender_idx.numel() > 0:
-            # CoM-based relative features
-            delta_pos = agent_states[sender_idx, :2] - agent_states[receiver_idx, :2]    # (E, 2)
-            delta_vel = agent_states[sender_idx, 2:4] - agent_states[receiver_idx, 2:4]  # (E, 2)
-            delta_theta = _wrap_angle(
-                agent_states[sender_idx, 4] - agent_states[receiver_idx, 4]
-            )  # (E,)
-
-            # Closest drone pair info
-            min_d = dist_min[sender_idx, receiver_idx]  # (E,)
-
-            # Gather the positions of the closest drones
-            batch_idx_e = torch.arange(sender_idx.numel(), device=device)
-            k_sel = k_closest[sender_idx, receiver_idx]  # (E,)
-            l_sel = l_closest[sender_idx, receiver_idx]  # (E,)
-
-            closest_pos_i = agent_drone_pos[sender_idx, k_sel]    # (E, 2)
-            closest_pos_j = agent_drone_pos[receiver_idx, l_sel]  # (E, 2)
-            closest_delta = closest_pos_i - closest_pos_j          # (E, 2)
-
-            edge_feat = torch.stack([
-                delta_pos[:, 0], delta_pos[:, 1],
-                delta_vel[:, 0], delta_vel[:, 1],
-                delta_theta,
-                min_d,
-                closest_delta[:, 0], closest_delta[:, 1],
-            ], dim=-1)  # (E, 8)
-
-            senders_list.append(sender_idx)
-            receivers_list.append(receiver_idx)
-            edge_feats_list.append(edge_feat)
-
-    # ==================================================================
-    # Goal/Obstacle → Agent edges (CoM-based, standard radius)
-    # ==================================================================
-    non_agent_start = n_agents  # goals start here
-    non_agent_states = all_states_cat[non_agent_start:]  # (n_goals + n_obs, 6)
-    n_non_agent = non_agent_states.shape[0]
-
-    if n_non_agent > 0 and n_agents > 0:
-        # Distances: non-agent CoM → agent CoM  (n_non_agent, n_agents)
-        pos_non_agent = non_agent_states[:, :2]
-        diff_na = pos_non_agent.unsqueeze(1) - agent_pos.unsqueeze(0)  # (K, n_agents, 2)
-        dist_na = torch.norm(diff_na, dim=-1)  # (K, n_agents)
-
-        mask_na = dist_na <= comm_radius
-        na_sender, na_receiver = torch.where(mask_na)
-
-        if na_sender.numel() > 0:
-            # Global sender indices (offset by n_agents)
-            global_sender = na_sender + non_agent_start
-
-            delta_pos = all_states_cat[global_sender, :2] - agent_states[na_receiver, :2]
-            delta_vel = all_states_cat[global_sender, 2:4] - agent_states[na_receiver, 2:4]
-            delta_theta = _wrap_angle(
-                all_states_cat[global_sender, 4] - agent_states[na_receiver, 4]
-            )
-
-            # For goal/obstacle → agent, min_dist = CoM distance, closest = CoM delta
-            min_d = dist_na[na_sender, na_receiver]
-            closest_dx = delta_pos[:, 0]
-            closest_dy = delta_pos[:, 1]
-
-            edge_feat = torch.stack([
-                delta_pos[:, 0], delta_pos[:, 1],
-                delta_vel[:, 0], delta_vel[:, 1],
-                delta_theta,
-                min_d,
-                closest_dx, closest_dy,
-            ], dim=-1)  # (E, 8)
-
-            senders_list.append(global_sender)
-            receivers_list.append(na_receiver)
-            edge_feats_list.append(edge_feat)
-
-    # ---- Assemble ----
-    if len(senders_list) > 0:
-        all_senders = torch.cat(senders_list, dim=0)
-        all_receivers = torch.cat(receivers_list, dim=0)
-        all_edges = torch.cat(edge_feats_list, dim=0)
+    if s_idx.numel() > 0:
+        delta_pos = all_states_cat[s_idx, :2] - agent_states[r_idx, :2]
+        delta_vel = all_states_cat[s_idx, 2:4] - agent_states[r_idx, 2:4]
+        edges = torch.cat([delta_pos, delta_vel], dim=-1)  # (E, 4)
     else:
-        all_senders = torch.zeros(0, dtype=torch.long, device=device)
-        all_receivers = torch.zeros(0, dtype=torch.long, device=device)
-        all_edges = torch.zeros(0, edge_dim, device=device)
+        s_idx = torch.zeros(0, dtype=torch.long, device=device)
+        r_idx = torch.zeros(0, dtype=torch.long, device=device)
+        edges = torch.zeros(0, edge_dim, device=device)
 
     return GraphsTuple(
         nodes=node_feats,
-        edges=all_edges,
-        senders=all_senders,
-        receivers=all_receivers,
+        edges=edges,
+        senders=s_idx,
+        receivers=r_idx,
         n_node=n_total,
-        n_edge=all_senders.shape[0],
+        n_edge=s_idx.shape[0],
         node_type=node_type_vec,
     )
 
 
 # ------------------------------------------------------------------
-# Fully vectorized mega-graph builder (batch dimension)
+# Vectorized mega-graph builder (batch dimension)
 # ------------------------------------------------------------------
 
 def build_vectorized_swarm_graph(
     agent_states: torch.Tensor,
     goal_states: torch.Tensor,
     obstacle_states: torch.Tensor,
-    local_offsets: torch.Tensor,
     comm_radius: float,
     node_dim: int = 3,
-    edge_dim: int = 8,
+    edge_dim: int = 4,
 ) -> GraphsTuple:
     """
-    Build ONE mega-graph from B independent swarm environments in parallel.
-
-    All heavy computation (drone positions, 9-point distances, edge masks)
-    is fully batched on GPU.  Only sparse edge extraction uses ``torch.where``.
+    Build ONE mega-graph from B independent swarm environments.
 
     Parameters
     ----------
-    agent_states    : (B, n_agents, 6)
-    goal_states     : (B, n_agents, 6)
-    obstacle_states : (B, n_obs, 6)
-    local_offsets   : (3, 2) — equilateral triangle offsets
+    agent_states    : (B, n_agents, 4)
+    goal_states     : (B, n_agents, 4)
+    obstacle_states : (B, n_obs, 4)
     comm_radius     : float
-    node_dim        : int (default 3)
-    edge_dim        : int (default 8)
+    node_dim, edge_dim : int
 
     Returns
     -------
@@ -322,147 +141,83 @@ def build_vectorized_swarm_graph(
     B, n, _ = agent_states.shape
     device = agent_states.device
     n_obs = obstacle_states.shape[1] if obstacle_states is not None and obstacle_states.ndim == 3 else 0
-    N_per = n * 2 + n_obs  # nodes per sample
+    N_per = n * 2 + n_obs
 
-    # ==================================================================
-    # 1. Node features (one-hot, tiled across B)
-    # ==================================================================
-    node_feats_single = torch.zeros(N_per, node_dim, device=device)
-    node_feats_single[:n, 0] = 1.0          # agents
-    node_feats_single[n:2*n, 1] = 1.0       # goals
+    # ---- Node features (one-hot, tiled) ----
+    nf = torch.zeros(N_per, node_dim, device=device)
+    nf[:n, 0] = 1.0
+    nf[n:2*n, 1] = 1.0
     if n_obs > 0:
-        node_feats_single[2*n:, 2] = 1.0    # obstacles
-    node_feats = node_feats_single.unsqueeze(0).expand(B, -1, -1).reshape(B * N_per, node_dim)
+        nf[2*n:, 2] = 1.0
+    node_feats = nf.unsqueeze(0).expand(B, -1, -1).reshape(B * N_per, node_dim)
 
-    node_types_parts = [
+    nt_parts = [
         torch.zeros(n, dtype=torch.long, device=device),
         torch.ones(n, dtype=torch.long, device=device),
     ]
     if n_obs > 0:
-        node_types_parts.append(torch.full((n_obs,), 2, dtype=torch.long, device=device))
-    node_types_single = torch.cat(node_types_parts)
-    node_types = node_types_single.unsqueeze(0).expand(B, -1).reshape(B * N_per)
+        nt_parts.append(torch.full((n_obs,), 2, dtype=torch.long, device=device))
+    node_types = torch.cat(nt_parts).unsqueeze(0).expand(B, -1).reshape(B * N_per)
 
-    # ==================================================================
-    # 2. Drone positions (B, n, 3, 2) — fully batched
-    # ==================================================================
-    R = _rotation_matrix(agent_states[:, :, 4])  # (B, n, 2, 2)
-    rotated = torch.einsum("bnij,kj->bnki", R, local_offsets)  # (B, n, 3, 2)
-    drone_pos = agent_states[:, :, :2].unsqueeze(2) + rotated   # (B, n, 3, 2)
+    # ---- All non-agent states ----
+    if n_obs > 0:
+        non_agent = torch.cat([goal_states, obstacle_states], dim=1)  # (B, n+n_obs, 4)
+    else:
+        non_agent = goal_states  # (B, n, 4)
+    K = non_agent.shape[1]
 
-    # ==================================================================
-    # 3. Agent–Agent edges: 9-point drone distances (B, n, n, 3, 3)
-    # ==================================================================
+    # ---- Build all edges: (agents + non_agents) → agents ----
     senders_parts = []
     receivers_parts = []
     edges_parts = []
 
+    # Agent–Agent edges
     if n > 1:
-        diff_aa = (
-            drone_pos[:, :, None, :, None, :]    # (B, n, 1, 3, 1, 2)
-            - drone_pos[:, None, :, None, :, :]  # (B, 1, n, 1, 3, 2)
-        )  # (B, n, n, 3, 3, 2)
-        dist_aa = torch.norm(diff_aa, dim=-1)             # (B, n, n, 3, 3)
-        dist_flat = dist_aa.reshape(B, n, n, -1)
-        dist_min, flat_idx = dist_flat.min(dim=-1)         # (B, n, n)
-        k_closest = flat_idx // 3
-        l_closest = flat_idx % 3
-
-        # Edge mask: within radius, no self-loops
-        aa_mask = dist_min <= comm_radius
+        ap = agent_states[:, :, :2]  # (B, n, 2)
+        diff_aa = ap.unsqueeze(2) - ap.unsqueeze(1)  # (B, n, n, 2)
+        dist_aa = torch.norm(diff_aa, dim=-1)         # (B, n, n)
+        aa_mask = dist_aa <= comm_radius
         eye = torch.eye(n, dtype=torch.bool, device=device)
         aa_mask = aa_mask & ~eye.unsqueeze(0)
 
-        # Extract edges via torch.where (vectorized)
         b_idx, s_idx, r_idx = torch.where(aa_mask)
-
         if b_idx.numel() > 0:
-            # Global node indices (mega-graph offset)
-            global_s = s_idx + b_idx * N_per
-            global_r = r_idx + b_idx * N_per
-
-            # CoM relative features
             dpos = agent_states[b_idx, s_idx, :2] - agent_states[b_idx, r_idx, :2]
             dvel = agent_states[b_idx, s_idx, 2:4] - agent_states[b_idx, r_idx, 2:4]
-            dtheta = _wrap_angle(agent_states[b_idx, s_idx, 4] - agent_states[b_idx, r_idx, 4])
+            senders_parts.append(s_idx + b_idx * N_per)
+            receivers_parts.append(r_idx + b_idx * N_per)
+            edges_parts.append(torch.cat([dpos, dvel], dim=-1))
 
-            min_d = dist_min[b_idx, s_idx, r_idx]
-
-            # Closest drone pair
-            k_sel = k_closest[b_idx, s_idx, r_idx]
-            l_sel = l_closest[b_idx, s_idx, r_idx]
-            c_pos_i = drone_pos[b_idx, s_idx, k_sel]    # (E, 2)
-            c_pos_j = drone_pos[b_idx, r_idx, l_sel]    # (E, 2)
-            c_delta = c_pos_i - c_pos_j
-
-            edge_feat = torch.stack([
-                dpos[:, 0], dpos[:, 1],
-                dvel[:, 0], dvel[:, 1],
-                dtheta, min_d,
-                c_delta[:, 0], c_delta[:, 1],
-            ], dim=-1)
-
-            senders_parts.append(global_s)
-            receivers_parts.append(global_r)
-            edges_parts.append(edge_feat)
-
-    # ==================================================================
-    # 4. Goal/Obstacle → Agent edges (CoM-based)
-    # ==================================================================
-    # Non-agent states: (B, n + n_obs, 6)
-    if n_obs > 0:
-        non_agent = torch.cat([goal_states, obstacle_states], dim=1)
-    else:
-        non_agent = goal_states
-    K = non_agent.shape[1]  # n_goals + n_obs
-
-    pos_na = non_agent[:, :, :2]            # (B, K, 2)
-    pos_a = agent_states[:, :, :2]          # (B, n, 2)
+    # Non-agent → Agent edges
+    pos_na = non_agent[:, :, :2]           # (B, K, 2)
+    pos_a = agent_states[:, :, :2]         # (B, n, 2)
     diff_na = pos_na.unsqueeze(2) - pos_a.unsqueeze(1)  # (B, K, n, 2)
-    dist_na = torch.norm(diff_na, dim=-1)   # (B, K, n)
-
+    dist_na = torch.norm(diff_na, dim=-1)  # (B, K, n)
     na_mask = dist_na <= comm_radius
     b_na, k_na, a_na = torch.where(na_mask)
-
     if b_na.numel() > 0:
-        # Global indices: non-agents start at offset n within each sample
-        global_s_na = (n + k_na) + b_na * N_per
-        global_r_na = a_na + b_na * N_per
-
         dpos = non_agent[b_na, k_na, :2] - agent_states[b_na, a_na, :2]
         dvel = non_agent[b_na, k_na, 2:4] - agent_states[b_na, a_na, 2:4]
-        dtheta = _wrap_angle(non_agent[b_na, k_na, 4] - agent_states[b_na, a_na, 4])
-        min_d = dist_na[b_na, k_na, a_na]
+        senders_parts.append((n + k_na) + b_na * N_per)
+        receivers_parts.append(a_na + b_na * N_per)
+        edges_parts.append(torch.cat([dpos, dvel], dim=-1))
 
-        edge_feat = torch.stack([
-            dpos[:, 0], dpos[:, 1],
-            dvel[:, 0], dvel[:, 1],
-            dtheta, min_d,
-            dpos[:, 0], dpos[:, 1],  # closest = CoM for non-agents
-        ], dim=-1)
-
-        senders_parts.append(global_s_na)
-        receivers_parts.append(global_r_na)
-        edges_parts.append(edge_feat)
-
-    # ==================================================================
-    # 5. Assemble mega-graph
-    # ==================================================================
-    if len(senders_parts) > 0:
-        all_senders = torch.cat(senders_parts)
-        all_receivers = torch.cat(receivers_parts)
-        all_edges = torch.cat(edges_parts)
+    # ---- Assemble ----
+    if senders_parts:
+        all_s = torch.cat(senders_parts)
+        all_r = torch.cat(receivers_parts)
+        all_e = torch.cat(edges_parts)
     else:
-        all_senders = torch.zeros(0, dtype=torch.long, device=device)
-        all_receivers = torch.zeros(0, dtype=torch.long, device=device)
-        all_edges = torch.zeros(0, edge_dim, device=device)
+        all_s = torch.zeros(0, dtype=torch.long, device=device)
+        all_r = torch.zeros(0, dtype=torch.long, device=device)
+        all_e = torch.zeros(0, edge_dim, device=device)
 
     return GraphsTuple(
         nodes=node_feats,
-        edges=all_edges,
-        senders=all_senders,
-        receivers=all_receivers,
+        edges=all_e,
+        senders=all_s,
+        receivers=all_r,
         n_node=B * N_per,
-        n_edge=all_senders.shape[0],
+        n_edge=all_s.shape[0],
         node_type=node_types,
     )

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-GCBF+ Training Loop — Swarm variant (VECTORIZED).
+GCBF+ Training Loop — Swarm variant (4D Bounding Circle, VECTORIZED).
 
-Uses VectorizedSwarmEnv to run all B environments in parallel on GPU.
-Data collection: B environments × H timesteps → only H graph builds + GNN
-forward passes (instead of B×H in the non-vectorized version).
+Simplified from 6D rigid body to 4D point mass with r_swarm = 0.4 bounding
+circle.  Functionally identical to the baseline DoubleIntegrator training
+but with a larger effective collision radius.
+
+  State:  4D [px, py, vx, vy]
+  Action: 2D [ax, ay]
+  Edges:  4D [Δpx, Δpy, Δvx, Δvy]
 
 Usage:
-    python -m gcbf_plus.train_swarm --num_agents 3 --num_steps 2000 --batch_size 256
+    python -m gcbf_plus.train_swarm --num_agents 3 --num_steps 10000
 """
 
 from __future__ import annotations
@@ -23,12 +27,7 @@ from gcbf_plus.env.vectorized_swarm import VectorizedSwarmEnv
 from gcbf_plus.nn import GCBFNetwork, PolicyNetwork
 from gcbf_plus.algo.loss import compute_loss
 from gcbf_plus.algo.qp_solver_torch import solve_cbf_qp_batched
-from gcbf_plus.utils.graph import GraphsTuple
-from gcbf_plus.utils.swarm_graph import (
-    _wrap_angle,
-    get_equilateral_offsets,
-    build_vectorized_swarm_graph,
-)
+from gcbf_plus.utils.swarm_graph import build_vectorized_swarm_graph
 
 
 def extract_agent_outputs(
@@ -37,14 +36,9 @@ def extract_agent_outputs(
     n_nodes_per_sample: int,
     n_samples: int,
 ) -> torch.Tensor:
-    """
-    Extract agent-only rows from a mega-graph GNN output.
-
-    For each of n_samples graphs, agents are the first n_agents nodes.
-    """
+    """Extract agent-only rows from mega-graph GNN output."""
     offsets = torch.arange(n_samples, device=full_output.device) * n_nodes_per_sample
     agent_offsets = torch.arange(n_agents, device=full_output.device)
-    # (n_samples, n_agents)
     idx = offsets.unsqueeze(1) + agent_offsets.unsqueeze(0)
     return full_output[idx.reshape(-1)]
 
@@ -52,7 +46,7 @@ def extract_agent_outputs(
 def train(
     num_agents: int = 3,
     area_size: float = 4.0,
-    num_steps: int = 2000,
+    num_steps: int = 10000,
     batch_size: int = 256,
     horizon: int = 32,
     lr_cbf: float = 1e-4,
@@ -69,18 +63,17 @@ def train(
     checkpoint_path: str = "gcbf_swarm_checkpoint.pt",
     device: str = "auto",
 ) -> Dict[str, list]:
-    """Train GCBF+ swarm networks with vectorized data collection."""
+    """Train GCBF+ swarm networks (4D bounding circle, vectorized)."""
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # ---- Device ----
     if device == "auto":
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         dev = torch.device(device)
     print(f"  Device: {dev}")
 
-    # ---- Vectorized environment ----
+    # ---- Env ----
     n_obs = 2
     vec_env = VectorizedSwarmEnv(
         num_agents=num_agents,
@@ -89,16 +82,16 @@ def train(
         params={"comm_radius": 2.0, "n_obs": n_obs},
     )
 
-    # ---- Networks ----
+    # ---- Networks (4D state, 4D edges, 2D action) ----
     gcbf_net = GCBFNetwork(
         node_dim=vec_env.node_dim,    # 3
-        edge_dim=vec_env.edge_dim,    # 8
+        edge_dim=vec_env.edge_dim,    # 4
         n_agents=num_agents,
     ).to(dev)
     policy_net = PolicyNetwork(
         node_dim=vec_env.node_dim,    # 3
-        edge_dim=vec_env.edge_dim,    # 8
-        action_dim=vec_env.action_dim,  # 3
+        edge_dim=vec_env.edge_dim,    # 4
+        action_dim=vec_env.action_dim,  # 2
         n_agents=num_agents,
     ).to(dev)
 
@@ -106,19 +99,14 @@ def train(
     optim_actor = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
 
     # ---- Constants ----
-    B_mat = torch.tensor(vec_env.g_x_matrix, dtype=torch.float32, device=dev)
-    K_mat = vec_env._K_trans.to(dev)
+    B_mat = torch.tensor(vec_env.g_x_matrix, dtype=torch.float32, device=dev)  # (4, 2)
+    K_mat = vec_env._K.to(dev)  # (2, 4)
     mass = vec_env.params["mass"]
-    inertia = vec_env.params["inertia"]
     u_max = vec_env.params.get("u_max")
-    alpha_max_val = vec_env.params.get("alpha_max")
-    R_form = vec_env.params["R_form"]
-    N_per = num_agents * 2 + n_obs  # nodes per sample
+    r_swarm = vec_env.params["r_swarm"]
+    N_per = num_agents * 2 + n_obs
     T_loss = horizon - 1
-    Kp_theta = vec_env._Kp_theta
-    Kd_theta = vec_env._Kd_theta
 
-    # ---- History ----
     history: Dict[str, list] = {
         "step": [], "loss/total": [], "loss/safe": [], "loss/unsafe": [],
         "loss/h_dot": [], "loss/action": [], "acc/safe": [], "acc/unsafe": [],
@@ -126,13 +114,10 @@ def train(
     }
 
     print("=" * 60)
-    print(f"  GCBF+ Swarm Training (VECTORIZED)"
-          f"  |  swarms={num_agents}  batch={batch_size}  horizon={horizon}")
-    print(f"  Data collection: {horizon} graph builds (was {batch_size}×{horizon}"
-          f" = {batch_size*horizon} before)")
-    print(f"  Training samples per step: {batch_size} × {T_loss} "
-          f"= {batch_size * T_loss}")
-    print(f"  State=6D  Action=3D  Edge=8D  Nodes/sample={N_per}")
+    print(f"  GCBF+ Swarm Training (4D Bounding Circle, vectorized)")
+    print(f"  swarms={num_agents}  batch={batch_size}  horizon={horizon}"
+          f"  r_swarm={r_swarm}")
+    print(f"  State=4D  Action=2D  Edge=4D  Nodes/sample={N_per}")
     print(f"  coef_action={coef_action}  coef_safe={coef_safe}"
           f"  coef_unsafe={coef_unsafe}  coef_h_dot={coef_h_dot}")
     print("=" * 60)
@@ -141,150 +126,108 @@ def train(
     for step in range(1, num_steps + 1):
 
         # ============================================================
-        # PHASE 1: VECTORIZED Data Collection (no_grad)
-        # ============================================================
-        # All B environments run in parallel — ONE graph build + ONE
-        # GNN forward pass per timestep (instead of B each).
+        # PHASE 1: Vectorized data collection (no_grad)
         # ============================================================
         vec_env.reset(dev)
+        goal_fixed = vec_env._goal_states.clone()
+        obs_fixed = vec_env._obstacle_states.clone()
 
-        # Fixed across the rollout
-        goal_states_fixed = vec_env._goal_states.clone()        # (B, n, 6)
-        obs_states_fixed = vec_env._obstacle_states.clone()     # (B, n_obs, 6)
-
-        all_agent_states = []   # list of (B, n, 6), length = horizon
-        all_unsafe = []         # list of (B, n),    length = horizon
+        all_agent_states = []
+        all_unsafe = []
 
         with torch.no_grad():
             for t in range(horizon):
                 all_agent_states.append(vec_env._agent_states.clone())
                 all_unsafe.append(vec_env.unsafe_mask())
 
-                # ONE mega-graph for all B envs
                 mega = vec_env.build_batch_graph()
-                # ONE GNN forward for all B envs
-                pi_all = policy_net.gnn_layers[0](mega)  # (B*N_per, 3)
-                pi_agents = extract_agent_outputs(
-                    pi_all, num_agents, N_per, batch_size
-                )  # (B*n, 3)
+                pi_all = policy_net.gnn_layers[0](mega)
+                pi_agents = extract_agent_outputs(pi_all, num_agents, N_per, batch_size)
 
-                u_ref = vec_env.nominal_controller()  # (B, n, 3)
-                u = 2.0 * pi_agents.reshape(batch_size, num_agents, 3) + u_ref
+                u_ref = vec_env.nominal_controller()
+                u = 2.0 * pi_agents.reshape(batch_size, num_agents, 2) + u_ref
                 vec_env.step(u)
 
-        # Compute safe labels from unsafe masks
+        # Safe labels
         unsafe_stack = torch.stack(all_unsafe)  # (T, B, n)
         safe_list = []
         for t in range(horizon):
-            window = unsafe_stack[:t+1]
-            was_ever_unsafe = window.any(dim=0)  # (B, n)
-            safe_t = ~was_ever_unsafe
+            was_ever = unsafe_stack[:t+1].any(dim=0)
+            safe_t = ~was_ever
             if t == 0:
                 safe_t = torch.ones(batch_size, num_agents, dtype=torch.bool, device=dev)
             safe_list.append(safe_t)
 
         # ============================================================
-        # PHASE 2: Reshape collected data for training
+        # PHASE 2: Reshape for training
         # ============================================================
-        # Use timesteps 0..T_loss-1 (= horizon-2)
-        # Stack → (T_loss, B, n, 6) then reshape to (S, n, 6)
         S = T_loss * batch_size
+        agent_4d = torch.stack(all_agent_states[:T_loss]).reshape(S, num_agents, 4)
+        goal_rep = goal_fixed.unsqueeze(0).expand(T_loss, -1, -1, -1).reshape(S, num_agents, 4)
+        obs_rep = obs_fixed.unsqueeze(0).expand(T_loss, -1, -1, -1).reshape(S, n_obs, 4)
 
-        agent_states_4d = torch.stack(all_agent_states[:T_loss])  # (T_loss, B, n, 6)
-        agent_states_3d = agent_states_4d.reshape(S, num_agents, 6)
-
-        goal_rep = goal_states_fixed.unsqueeze(0).expand(T_loss, -1, -1, -1)
-        goal_3d = goal_rep.reshape(S, num_agents, 6)
-
-        obs_rep = obs_states_fixed.unsqueeze(0).expand(T_loss, -1, -1, -1)
-        obs_3d = obs_rep.reshape(S, n_obs, 6)
-
-        safe_4d = torch.stack(safe_list[:T_loss])   # (T_loss, B, n)
-        unsafe_4d = torch.stack(all_unsafe[:T_loss]) # (T_loss, B, n)
-        safe_flat = safe_4d.reshape(-1)               # (S*n,)
-        unsafe_flat = unsafe_4d.reshape(-1)            # (S*n,)
+        safe_flat = torch.stack(safe_list[:T_loss]).reshape(-1)
+        unsafe_flat = torch.stack(all_unsafe[:T_loss]).reshape(-1)
 
         # ============================================================
-        # PHASE 3: Build ONE mega-graph (gradient-tracked)
+        # PHASE 3: Gradient-tracked mega-graph
         # ============================================================
-        agent_states_grad = agent_states_3d.detach().requires_grad_(True)
+        agent_grad = agent_4d.detach().requires_grad_(True)
 
-        mega_graph = build_vectorized_swarm_graph(
-            agent_states=agent_states_grad,
-            goal_states=goal_3d,
-            obstacle_states=obs_3d,
-            local_offsets=vec_env._local_offsets,
+        mega = build_vectorized_swarm_graph(
+            agent_states=agent_grad,
+            goal_states=goal_rep,
+            obstacle_states=obs_rep,
             comm_radius=vec_env.comm_radius,
             node_dim=vec_env.node_dim,
             edge_dim=vec_env.edge_dim,
         )
 
         # ============================================================
-        # PHASE 4: ONE forward pass through GNN
+        # PHASE 4: GNN forward
         # ============================================================
-        h_all = gcbf_net.gnn_layers[0](mega_graph)
-        pi_all = policy_net.gnn_layers[0](mega_graph)
+        h_all = gcbf_net.gnn_layers[0](mega)
+        pi_all = policy_net.gnn_layers[0](mega)
 
         h_agents = extract_agent_outputs(h_all, num_agents, N_per, S).squeeze(-1)
         pi_agents = extract_agent_outputs(pi_all, num_agents, N_per, S)
 
         # ============================================================
-        # PHASE 5: Compute u_ref, action, Lie derivative
+        # PHASE 5: u_ref, action, Lie derivative
         # ============================================================
-        states_flat = agent_states_grad.reshape(-1, 6)
-        goals_flat = goal_3d.reshape(-1, 6)
+        states_flat = agent_grad.reshape(-1, 4)     # (S*n, 4)
+        goals_flat = goal_rep.reshape(-1, 4)
 
-        # Translational LQR
-        err_trans = states_flat[:, :4].detach() - goals_flat[:, :4]
-        u_trans = -torch.einsum("...j,ij->...i", err_trans, K_mat)
+        err = states_flat[:, :4].detach() - goals_flat
+        u_ref_flat = -torch.einsum("...j,ij->...i", err, K_mat)  # (S*n, 2)
         if u_max is not None:
-            u_trans = torch.clamp(u_trans, -u_max, u_max)
-
-        # Angular PD
-        theta_err = _wrap_angle(states_flat[:, 4].detach() - goals_flat[:, 4])
-        omega = states_flat[:, 5].detach()
-        u_alpha = -(Kp_theta * theta_err + Kd_theta * omega)
-        if alpha_max_val is not None:
-            u_alpha = torch.clamp(u_alpha, -alpha_max_val, alpha_max_val)
-
-        u_ref_flat = torch.cat([u_trans, u_alpha.unsqueeze(-1)], dim=1)
+            u_ref_flat = torch.clamp(u_ref_flat, -u_max, u_max)
 
         action_flat = 2.0 * pi_agents + u_ref_flat
 
-        # State derivative ẋ = [v, a/m, ω, α/I]
+        # Clamp for dynamics
         action_c = action_flat.clone()
         if u_max is not None:
-            action_c = torch.cat([
-                torch.clamp(action_c[:, :2], -u_max, u_max),
-                action_c[:, 2:3],
-            ], dim=1)
-        if alpha_max_val is not None:
-            action_c = torch.cat([
-                action_c[:, :2],
-                torch.clamp(action_c[:, 2:3], -alpha_max_val, alpha_max_val),
-            ], dim=1)
+            action_c = torch.clamp(action_c, -u_max, u_max)
 
         vel = states_flat[:, 2:4]
-        accel = action_c[:, :2] / mass
-        omega_s = states_flat[:, 5:6]
-        ang_accel = action_c[:, 2:3] / inertia
-        x_dot = torch.cat([vel, accel, omega_s, ang_accel], dim=1)
+        accel = action_c / mass
+        x_dot = torch.cat([vel, accel], dim=1)  # (S*n, 4)
 
         # Lie derivative
         dh_dx_3d = torch.autograd.grad(
-            h_agents.sum(), agent_states_grad,
+            h_agents.sum(), agent_grad,
             create_graph=True, retain_graph=True,
         )[0]
-        dh_dx = dh_dx_3d.reshape(-1, 6)
+        dh_dx = dh_dx_3d.reshape(-1, 4)
         h_dot = (dh_dx * x_dot).sum(dim=-1)
 
         # ============================================================
-        # PHASE 6: QP solve (batched, no_grad)
+        # PHASE 6: QP solve
         # ============================================================
         with torch.no_grad():
             x_dot_f = torch.zeros_like(states_flat)
             x_dot_f[:, :2] = states_flat[:, 2:4].detach()
-            x_dot_f[:, 4:5] = states_flat[:, 5:6].detach()
 
             u_qp = solve_cbf_qp_batched(
                 u_nom=u_ref_flat,
@@ -300,18 +243,12 @@ def train(
         # PHASE 7: Loss + backprop
         # ============================================================
         loss, info = compute_loss(
-            h=h_agents,
-            h_dot=h_dot,
-            pi_action=action_flat,
-            u_qp=u_qp,
-            safe_mask=safe_flat,
-            unsafe_mask=unsafe_flat,
-            alpha=alpha,
-            eps=eps,
-            coef_safe=coef_safe,
-            coef_unsafe=coef_unsafe,
-            coef_h_dot=coef_h_dot,
-            coef_action=coef_action,
+            h=h_agents, h_dot=h_dot,
+            pi_action=action_flat, u_qp=u_qp,
+            safe_mask=safe_flat, unsafe_mask=unsafe_flat,
+            alpha=alpha, eps=eps,
+            coef_safe=coef_safe, coef_unsafe=coef_unsafe,
+            coef_h_dot=coef_h_dot, coef_action=coef_action,
         )
 
         optim_cbf.zero_grad()
@@ -322,9 +259,6 @@ def train(
         optim_cbf.step()
         optim_actor.step()
 
-        # ============================================================
-        # Logging
-        # ============================================================
         if step % log_interval == 0 or step == 1:
             elapsed = time.time() - t_start
             print(
@@ -348,7 +282,6 @@ def train(
     print(f"  Swarm training complete in {time.time() - t_start:.1f}s")
     print("=" * 60)
 
-    # ---- Save ----
     ckpt = {
         "gcbf_net": gcbf_net.state_dict(),
         "policy_net": policy_net.state_dict(),
@@ -360,7 +293,8 @@ def train(
             "action_dim": vec_env.action_dim,
             "state_dim": vec_env.state_dim,
             "comm_radius": vec_env.comm_radius,
-            "R_form": R_form,
+            "r_swarm": r_swarm,
+            "R_form": vec_env.params["R_form"],
             "n_obs": n_obs,
             "dt": vec_env.dt,
         },
@@ -372,17 +306,18 @@ def train(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train GCBF+ Swarm (vectorized)")
+    parser = argparse.ArgumentParser(description="Train GCBF+ Swarm (4D bounding circle)")
     parser.add_argument("--num_agents", type=int, default=3)
     parser.add_argument("--area_size", type=float, default=4.0)
-    parser.add_argument("--num_steps", type=int, default=2000)
+    parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=32)
     parser.add_argument("--lr_cbf", type=float, default=1e-4)
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--eps", type=float, default=0.02)
-    parser.add_argument("--log_interval", type=int, default=1)
+    parser.add_argument("--coef_action", type=float, default=0.01)
+    parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="gcbf_swarm_checkpoint.pt")
     parser.add_argument("--device", type=str, default="auto")

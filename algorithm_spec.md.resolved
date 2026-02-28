@@ -1,0 +1,288 @@
+# GCBF+ スワーム制御アルゴリズム — 技術仕様書
+
+## 1. 概要
+
+本システムは **GCBF+ (Graph Control Barrier Function)** フレームワークを3機ドローンのスワーム（剛体近似）に拡張したものである。各スワームはグラフの1ノードとして扱われ、GNNベースの安全フィルタがスワーム間の衝突回避を保証する。
+
+```mermaid
+flowchart LR
+    A["環境状態<br/>(B, n, 6)"] --> B["グラフ構築<br/>8D edge features"]
+    B --> C["GNN: CBF h(x)"]
+    B --> D["GNN: Policy π(x)"]
+    C --> E["QP Solver<br/>u_qp"]
+    D --> F["残差アクション<br/>u = 2π + u_ref"]
+    E --> G["損失計算"]
+    F --> G
+    G --> H["Backprop"]
+```
+
+---
+
+## 2. スワーム状態と力学
+
+### 2.1 状態ベクトル（6D）
+
+各スワーム $i$ の状態:
+
+$$x_i = [p_x,\; p_y,\; v_x,\; v_y,\; \theta,\; \omega]$$
+
+| 成分 | 意味 | 単位 |
+|------|------|------|
+| $p_x, p_y$ | 重心 (CoM) 位置 | m |
+| $v_x, v_y$ | CoM 速度 | m/s |
+| $\theta$ | ヨー角 (方位) | rad $\in [-\pi, \pi]$ |
+| $\omega$ | 角速度 | rad/s |
+
+### 2.2 制御入力（3D）
+
+$$u_i = [a_x,\; a_y,\; \alpha]$$
+
+| 成分 | 意味 | 範囲 |
+|------|------|------|
+| $a_x, a_y$ | 並進加速度 | $[-u_\text{max}, u_\text{max}]$ (0.3) |
+| $\alpha$ | 角加速度 | $[-\alpha_\text{max}, \alpha_\text{max}]$ (0.1) |
+
+### 2.3 連続時間力学
+
+$$\dot{x} = f(x) + g(x) \cdot u$$
+
+$$f(x) = \begin{bmatrix} v_x \\ v_y \\ 0 \\ 0 \\ \omega \\ 0 \end{bmatrix}, \quad
+g(x) = \begin{bmatrix} 0 & 0 & 0 \\ 0 & 0 & 0 \\ 1/m & 0 & 0 \\ 0 & 1/m & 0 \\ 0 & 0 & 0 \\ 0 & 0 & 1/I \end{bmatrix}$$
+
+- 質量 $m = 0.1$, 慣性モーメント $I = 0.01$
+
+### 2.4 離散化（オイラー積分, $\Delta t = 0.03$）
+
+$$p_{t+1} = p_t + v_t \Delta t + \frac{1}{2} \frac{a}{m} \Delta t^2$$
+$$v_{t+1} = v_t + \frac{a}{m} \Delta t$$
+$$\theta_{t+1} = \text{wrap}(\theta_t + \omega_t \Delta t + \frac{1}{2} \frac{\alpha}{I} \Delta t^2)$$
+$$\omega_{t+1} = \omega_t + \frac{\alpha}{I} \Delta t$$
+
+---
+
+## 3. スワーム幾何学
+
+### 3.1 フォーメーション定義
+
+3機のドローンが重心を中心とした正三角形の頂点に配置される。外接半径 $R_\text{form} = 0.3$。
+
+$$d_1 = (R, 0), \quad d_2 = (-R/2,\; R\sqrt{3}/2), \quad d_3 = (-R/2,\; -R\sqrt{3}/2)$$
+
+### 3.2 グローバル座標への変換
+
+スワーム $i$ のドローン $k$ のグローバル位置:
+
+$$p_{i,k} = p_i + R(\theta_i) \cdot d_k$$
+
+$$R(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{bmatrix}$$
+
+> [!IMPORTANT]
+> この回転行列は `torch.cos`, `torch.sin` で実装されており、autograd を通じて微分可能。
+
+---
+
+## 4. グラフ構造とエッジ特徴
+
+### 4.1 ノード構成
+
+| ノード種別 | 特徴量（3D one-hot） | 数 |
+|---|---|---|
+| Agent (スワーム) | `[1, 0, 0]` | $n$ |
+| Goal | `[0, 1, 0]` | $n$ |
+| Obstacle | `[0, 0, 1]` | $n_\text{obs}$ |
+
+### 4.2 Agent–Agent エッジ（ドローン間距離ベース）
+
+**エッジ生成条件**: スワーム $i$ と $j$ の間のエッジは、3×3=9個のドローンペア距離の**最小値**がセンシング半径 $R_\text{sensing}$ 以下の場合にのみ作成される。
+
+$$\text{edge}(i,j) \iff \min_{k,l \in \{1,2,3\}} \|p_{i,k} - p_{j,l}\| \leq R_\text{sensing}$$
+
+テンソル計算（バッチ化）:
+```
+diff = drone_pos[:, :, None, :, None, :] - drone_pos[:, None, :, None, :, :]
+# Shape: (B, n, n, 3, 3, 2)
+dist_min = torch.norm(diff, dim=-1).reshape(B, n, n, -1).min(dim=-1).values
+# Shape: (B, n, n)
+```
+
+**エッジ特徴量（8D）**:
+
+| 次元 | 内容 |
+|------|------|
+| 0–1 | $\Delta p_x, \Delta p_y$ (CoM相対位置) |
+| 2–3 | $\Delta v_x, \Delta v_y$ (CoM相対速度) |
+| 4 | $\Delta\theta_\text{wrapped}$ (ヨー角差, $[-\pi, \pi]$に正規化) |
+| 5 | $d_\text{min}$ (9ペア中の最小距離) |
+| 6–7 | $\delta x_\text{closest}, \delta y_\text{closest}$ (最近接ドローンペアの相対位置) |
+
+### 4.3 Goal/Obstacle → Agent エッジ（CoM距離ベース）
+
+ゴールと障害物はドローン形状を持たないため、CoM間ユークリッド距離で接続判定。エッジ特徴の dim 5–7 には CoM 距離と CoM 相対位置を使用。
+
+---
+
+## 5. ニューラルネットワーク
+
+### 5.1 GNNLayer (Message Passing)
+
+```
+メッセージ: q_ij = ψ₁([x_i, x_j, e_ij])   入力: 3+3+8 = 14次元
+集約:     m_i = Σ_j q_ij
+更新:     x_i' = ψ₂([x_i, m_i])
+```
+
+- $\psi_1$ (msg_net): MLP `14 → 256 → 256`
+- $\psi_2$ (update_net): MLP [(3 + 256) → 256 → out_dim](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/env/double_integrator.py#339-356)
+
+### 5.2 CBFネットワーク $h_\theta(x)$
+
+- 1層 GNNLayer, `out_dim = 1`
+- 出力: 各スワームのスカラーCBF値 $h_i \in \mathbb{R}$
+
+### 5.3 ポリシーネットワーク $\pi_\phi(x)$
+
+- 1層 GNNLayer, `out_dim = 3` (action_dim)
+- **残差ポリシー**: $u = 2 \cdot \pi_\phi(x) + u_\text{ref}$
+
+---
+
+## 6. 名目制御器 $u_\text{ref}$
+
+### 6.1 並進制御（LQR）
+
+離散時間LQR: 状態 $[p_x, p_y, v_x, v_y]$ に対してDARE（離散代数リカッチ方程式）を解き、ゲイン行列 $K \in \mathbb{R}^{2 \times 4}$ を算出。
+
+$$u_\text{trans} = -K \cdot (x_\text{trans} - x_\text{trans}^\text{goal})$$
+
+- $Q = 5 \cdot I_4$, $R = I_2$
+
+### 6.2 回転制御（PD制御）
+
+$$u_\alpha = -(K_p \cdot \text{wrap}(\theta - \theta_\text{goal}) + K_d \cdot \omega)$$
+
+- $K_p = 2.0$, $K_d = 1.0$, $\theta_\text{goal} = 0$
+
+---
+
+## 7. 安全性判定
+
+### 7.1 衝突判定 (unsafe_mask)
+
+**Agent–Agent**: スワーム $i, j$ の全9ドローンペア距離のいずれかが $2 r_\text{drone}$ 未満なら衝突。
+
+$$\text{collision}(i,j) \iff \min_{k,l}\|p_{i,k} - p_{j,l}\| < 2 r_\text{drone}$$
+
+- $r_\text{drone} = 0.05$
+
+**Agent–Obstacle**: 各ドローン位置が障害物の拡大領域（$\text{half\_size} + r_\text{drone}$）に入っているか判定。
+
+### 7.2 安全/非安全ラベル
+
+データ収集中の各タイムステップ $t$ について:
+- **unsafe**: そのステップで衝突状態にあるか
+- **safe**: ステップ $0$ から $t$ まで一度も衝突していないか
+
+---
+
+## 8. 学習アルゴリズム
+
+### 8.1 全体フロー
+
+```
+for step in 1..num_steps:
+    ┌─ Phase 1: ベクトル化データ収集 (no_grad) ──────┐
+    │  vec_env.reset()     # (B, n, 6) 全環境初期化   │
+    │  for t in 0..horizon-1:                          │
+    │    record states, unsafe_masks                   │
+    │    mega_graph = build_batch_graph()  # 1回       │
+    │    π_all = policy_net(mega_graph)    # 1回       │
+    │    u = 2·π + u_ref                               │
+    │    vec_env.step(u)                               │
+    └──────────────────────────────────────────────────┘
+    ┌─ Phase 2: 勾配付きメガグラフ構築 ──────────────┐
+    │  S = (horizon-1) × B 個のサンプル               │
+    │  agent_states_grad.requires_grad_(True)          │
+    │  mega_graph = build_vectorized_swarm_graph(...)   │
+    └──────────────────────────────────────────────────┘
+    ┌─ Phase 3–4: GNN Forward + Lie微分 ──────────────┐
+    │  h = GCBF_net(mega_graph)         # (S×n,)      │
+    │  π = Policy_net(mega_graph)       # (S×n, 3)    │
+    │  dh/dx = autograd.grad(h.sum(), states_grad)     │
+    │  ḣ = (dh/dx · ẋ).sum(dim=-1)                    │
+    └──────────────────────────────────────────────────┘
+    ┌─ Phase 5: QP Solver ────────────────────────────┐
+    │  u_qp = argmin ‖u - u_ref‖²                     │
+    │   s.t.  (dh/dx)·(f(x) + g(x)u) + α·h ≥ 0      │
+    │  (解析的KKT条件で高速バッチ解)                    │
+    └──────────────────────────────────────────────────┘
+    ┌─ Phase 6–7: 損失 + Backprop ─────────────────────┐
+    │  L = c₁·L_safe + c₂·L_unsafe + c₃·L_ḣ + c₄·L_u │
+    │  Adam update (CBF net + Policy net)               │
+    └──────────────────────────────────────────────────┘
+```
+
+### 8.2 損失関数
+
+$$L = c_\text{safe} \cdot L_\text{safe} + c_\text{unsafe} \cdot L_\text{unsafe} + c_\text{ḣ} \cdot L_\text{ḣ} + c_\text{action} \cdot L_\text{action}$$
+
+| 損失項 | 数式 | 係数 | 目的 |
+|--------|------|------|------|
+| $L_\text{safe}$ | $\frac{1}{|D_C|}\sum_{D_C} \text{ReLU}(-h + \varepsilon)$ | 1.0 | 安全状態で $h > 0$ |
+| $L_\text{unsafe}$ | $\frac{1}{|D_A|}\sum_{D_A} \text{ReLU}(h + \varepsilon)$ | 2.0 | 衝突状態で $h < 0$ |
+| $L_\text{ḣ}$ | $\frac{1}{|D|}\sum_D \text{ReLU}(-\dot{h} - \alpha h + \varepsilon)$ | 0.2 | CBF減少条件 $\dot{h} + \alpha h \geq 0$ |
+| $L_\text{action}$ | $\text{MSE}(2\pi + u_\text{ref},\; u_\text{qp})$ | **0.01** | ポリシーをQP解に追従 |
+
+- $\varepsilon = 0.02$ (マージン), $\alpha = 1.0$ (CBFクラスK関数)
+
+### 8.3 ハイパーパラメータ
+
+| パラメータ | 値 |
+|---|---|
+| batch_size | 256 |
+| horizon | 32 |
+| lr (CBF, Actor) | 1e-4 |
+| max_grad_norm | 2.0 |
+| optimizer | Adam |
+
+---
+
+## 9. ベクトル化の仕組み
+
+### 9.1 データ収集の並列化
+
+従来: Python for-loop で B=256 環境を逐次処理 → B×H = 8,192 回のグラフ構築+GNN推論。
+
+ベクトル化後: 状態テンソル [(B, n, 6)](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/env/double_integrator.py#339-356) で全環境を同時管理 → **H = 32 回**のみ。
+
+### 9.2 バッチ化された9点距離
+
+```python
+# ドローン位置: (B, n, 3, 2)
+diff = drone_pos[:, :, None, :, None, :] - drone_pos[:, None, :, None, :, :]
+# → (B, n, n, 3, 3, 2)  全バッチ・全ペアを1演算で計算
+dist_min = torch.norm(diff, dim=-1).reshape(B, n, n, -1).min(dim=-1).values
+```
+
+### 9.3 スパースエッジ抽出
+
+```python
+b_idx, s_idx, r_idx = torch.where(edge_mask)  # GPU上で一括抽出
+global_senders = s_idx + b_idx * N_per         # メガグラフオフセット
+```
+
+---
+
+## 10. ファイル構成
+
+| ファイル | 役割 |
+|---|---|
+| [env/swarm_integrator.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/env/swarm_integrator.py) | 単一環境（可視化用） |
+| [env/vectorized_swarm.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/env/vectorized_swarm.py) | バッチ化環境（学習用） |
+| [utils/swarm_graph.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/utils/swarm_graph.py) | グラフ構築 + ベクトル化グラフ構築 |
+| [train_swarm.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/train_swarm.py) | 学習ループ |
+| [nn/gnn.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/nn/gnn.py) | GNNLayer |
+| [nn/gcbf_net.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/nn/gcbf_net.py) | CBFネットワーク |
+| [nn/policy_net.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/nn/policy_net.py) | ポリシーネットワーク |
+| [algo/loss.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/algo/loss.py) | 損失関数 |
+| [algo/qp_solver_torch.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/gcbf_plus/algo/qp_solver_torch.py) | バッチQPソルバー |
+| [visualize.py](file://wsl.localhost/Ubuntu/home/taisei/Research/20260226/visualize.py) | 可視化（三角形フォーメーション描画） |

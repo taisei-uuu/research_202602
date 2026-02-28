@@ -158,6 +158,7 @@ def run_simulation(
     mode = "lqr"
     is_swarm = swarm_lqr  # --swarm_lqr forces swarm mode even without checkpoint
     R_form = 0.3
+    r_swarm = 0.4
     comm_radius = 2.0 if swarm_lqr else 1.5
 
     if checkpoint_path is not None:
@@ -168,8 +169,9 @@ def run_simulation(
         dt = cfg["dt"]
         comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
-        is_swarm = cfg.get("state_dim", 4) == 6
+        is_swarm = "r_swarm" in cfg  # detect swarm by r_swarm marker
         R_form = cfg.get("R_form", 0.3)
+        r_swarm = cfg.get("r_swarm", 0.4)
         if force_lqr:
             print("  [force_lqr] Ignoring trained policy — using LQR only")
             policy_net = None
