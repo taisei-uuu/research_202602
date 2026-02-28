@@ -199,11 +199,8 @@ def run_simulation(
 
     # ── Record initial state ─────────────────────────────────────────
     trajectories: List[np.ndarray] = []
-    thetas_list: List[np.ndarray] = []
 
     trajectories.append(env.agent_states[:, :2].detach().numpy().copy())
-    if is_swarm:
-        thetas_list.append(env.agent_states[:, 4].detach().numpy().copy())
 
     goals = env.goal_states[:, :2].detach().numpy().copy()
 
@@ -226,13 +223,11 @@ def run_simulation(
 
         _, info = env.step(u)
         trajectories.append(env.agent_states[:, :2].detach().numpy().copy())
-        if is_swarm:
-            thetas_list.append(env.agent_states[:, 4].detach().numpy().copy())
         if info["done"]:
             break
 
     trajectories = np.array(trajectories)  # (T+1, n, 2)
-    thetas = np.array(thetas_list) if is_swarm else None  # (T+1, n) or None
+    thetas = None  # no rotation in 4D bounding circle mode
 
     displacement = np.linalg.norm(trajectories[-1] - trajectories[0], axis=1)
     print(f"  Agent displacements: {displacement}")
