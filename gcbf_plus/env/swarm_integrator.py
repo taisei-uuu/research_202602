@@ -170,15 +170,27 @@ class SwarmIntegrator:
         self._step_count = 0
 
     def _sample_free_positions(self, rng, count, margin):
+        """Sample positions that avoid obstacles AND are >= 2*r_swarm apart."""
         area = self.area_size
+        min_dist = 2 * self.params["r_swarm"]
         positions = []
-        while len(positions) < count:
+        for _ in range(100_000):
+            if len(positions) >= count:
+                break
             p = rng.uniform(margin, area - margin, size=2).astype(np.float32)
+            # Check obstacle collision
             ok = True
             for obs in self._obstacles:
                 oc = obs.center.numpy()
                 ohs = obs.half_size.numpy() + margin
                 if abs(p[0] - oc[0]) < ohs[0] and abs(p[1] - oc[1]) < ohs[1]:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            # Check inter-agent distance
+            for existing in positions:
+                if np.linalg.norm(p - existing) < min_dist:
                     ok = False
                     break
             if ok:

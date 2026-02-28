@@ -163,21 +163,33 @@ class VectorizedSwarmEnv:
         self._K = self._K.to(device)
 
     def _sample_free_pos(self, rng, count, margin, batch_idx):
+        """Sample positions avoiding obstacles AND >= 2*r_swarm apart."""
         area = self.area_size
-        positions = np.empty((0, 2))
-        while positions.shape[0] < count:
-            cands = rng.uniform(margin, area - margin, size=(count * 4, 2)).astype(np.float32)
-            free = np.ones(cands.shape[0], dtype=bool)
+        min_dist = 2 * self.params["r_swarm"]
+        positions = []
+        for _ in range(100_000):
+            if len(positions) >= count:
+                break
+            p = rng.uniform(margin, area - margin, size=2).astype(np.float32)
+            ok = True
+            # Obstacle check
             if self._obstacle_centers is not None:
                 oc = self._obstacle_centers[batch_idx].cpu().numpy()
                 ohs = self._obstacle_half_sizes[batch_idx].cpu().numpy() + margin
                 for j in range(oc.shape[0]):
-                    inside = (np.abs(cands[:, 0] - oc[j, 0]) < ohs[j, 0]) & \
-                             (np.abs(cands[:, 1] - oc[j, 1]) < ohs[j, 1])
-                    free &= ~inside
-            cands = cands[free]
-            positions = np.concatenate([positions, cands], axis=0)
-        return positions[:count]
+                    if abs(p[0] - oc[j, 0]) < ohs[j, 0] and abs(p[1] - oc[j, 1]) < ohs[j, 1]:
+                        ok = False
+                        break
+            if not ok:
+                continue
+            # Inter-agent distance check
+            for existing in positions:
+                if np.linalg.norm(p - existing) < min_dist:
+                    ok = False
+                    break
+            if ok:
+                positions.append(p)
+        return np.array(positions)
 
     # ── Step ──────────────────────────────────────────────────────────
     def step(self, action: torch.Tensor):
