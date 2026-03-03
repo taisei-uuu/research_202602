@@ -52,6 +52,7 @@ class VectorizedSwarmEnv:
         "cable_length": 1.0,     # l (m)
         "gravity": 9.81,         # g (m/s^2)
         "gamma_max": 0.75,       # max swing angle (rad) — arcsin(r_swarm/l) with margin
+        "payload_damping": 0.03,  # small damping for numerical stability (1/s)
     }
 
     def __init__(
@@ -223,26 +224,29 @@ class VectorizedSwarmEnv:
 
         self._agent_states = torch.cat([new_pos, new_vel], dim=-1)
 
-        # ── Payload swing dynamics (Euler integration) ──
+        # ── Payload swing dynamics (Semi-implicit / Symplectic Euler) ──
         l = self.params["cable_length"]
         g = self.params["gravity"]
+        c = self.params["payload_damping"]  # damping coefficient
         ps = self._payload_states  # (B, n, 4)
         gx     = ps[:, :, 0]     # γ_x
         gy     = ps[:, :, 1]     # γ_y
         gx_dot = ps[:, :, 2]     # γ̇_x
         gy_dot = ps[:, :, 3]     # γ̇_y
 
-        # Swing accelerations (linearised pendulum driven by platform acceleration)
-        # action is force; accel = action/m is the platform acceleration
-        ax = accel[:, :, 0]  # platform accel x
-        ay = accel[:, :, 1]  # platform accel y
-        gx_ddot = -torch.cos(gx) * (ax / l) - torch.sin(gx) * (g / l)
-        gy_ddot = -torch.cos(gy) * (ay / l) - torch.sin(gy) * (g / l)
+        # Platform acceleration
+        ax = accel[:, :, 0]
+        ay = accel[:, :, 1]
 
-        new_gx     = gx + gx_dot * dt
-        new_gy     = gy + gy_dot * dt
+        # Swing accelerations: pendulum + platform forcing + damping
+        gx_ddot = -(g / l) * torch.sin(gx) - (ax / l) * torch.cos(gx) - c * gx_dot
+        gy_ddot = -(g / l) * torch.sin(gy) - (ay / l) * torch.cos(gy) - c * gy_dot
+
+        # Semi-implicit Euler: update velocity first, then position with new velocity
         new_gx_dot = gx_dot + gx_ddot * dt
         new_gy_dot = gy_dot + gy_ddot * dt
+        new_gx     = gx + new_gx_dot * dt
+        new_gy     = gy + new_gy_dot * dt
         self._payload_states = torch.stack([new_gx, new_gy, new_gx_dot, new_gy_dot], dim=-1)
 
         self._step_count += 1

@@ -111,6 +111,7 @@ def train(
     cable_length = vec_env.params["cable_length"]
     gravity = vec_env.params["gravity"]
     gamma_max = vec_env.params["gamma_max"]
+    payload_damping = vec_env.params["payload_damping"]
     hocbf_alpha1 = 2.0
     hocbf_alpha2 = 2.0
 
@@ -248,27 +249,32 @@ def train(
 
             l = cable_length
             g_val = gravity
+            c_damp = payload_damping
             a1 = hocbf_alpha1
             a2 = hocbf_alpha2
 
-            # X direction HOCBF
+            # X direction HOCBF (with damping: γ̈ = -(g/l)sin(γ) - (a/l)cos(γ) - c·γ̇)
             h1_x = gamma_max**2 - gx**2
             h1_dot_x = -2 * gx * gx_dot
             h2_x = h1_dot_x + a1 * h1_x
+            # γ̈ = -(g/l)sin(γ) - (a_x/l)cos(γ) - c·γ̇
+            # d(h1_dot_x)/dt = -2*(gx_dot² + gx*γ̈_x)
+            # The control-dependent part: gx * cos(gx) * a_x / l
             C_x = 2 * gx * torch.cos(gx) / l
+            # The unforced part (including damping):
             D_x = (2 * gx_dot**2
-                   - 2 * gx * torch.sin(gx) * (g_val / l)
-                   + 2 * a1 * gx * gx_dot
+                   - 2 * gx * (-(g_val / l) * torch.sin(gx) - c_damp * gx_dot)
+                   + a1 * (-2 * gx * gx_dot)
                    - a2 * h2_x)
 
-            # Y direction HOCBF
+            # Y direction HOCBF (with damping)
             h1_y = gamma_max**2 - gy**2
             h1_dot_y = -2 * gy * gy_dot
             h2_y = h1_dot_y + a1 * h1_y
             C_y = 2 * gy * torch.cos(gy) / l
             D_y = (2 * gy_dot**2
-                   - 2 * gy * torch.sin(gy) * (g_val / l)
-                   + 2 * a1 * gy * gy_dot
+                   - 2 * gy * (-(g_val / l) * torch.sin(gy) - c_damp * gy_dot)
+                   + a1 * (-2 * gy * gy_dot)
                    - a2 * h2_y)
 
             # Build A_extra (N, 2, 2) and b_extra (N, 2)

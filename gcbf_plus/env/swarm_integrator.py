@@ -67,6 +67,7 @@ class SwarmIntegrator:
         "cable_length": 1.0,     # l (m)
         "gravity": 9.81,         # g (m/s^2)
         "gamma_max": 0.75,       # max swing angle (rad)
+        "payload_damping": 0.03,  # small damping for numerical stability (1/s)
     }
 
     def __init__(
@@ -231,24 +232,28 @@ class SwarmIntegrator:
 
         self.agent_states = torch.cat([new_pos, new_vel], dim=-1)
 
-        # ── Payload swing dynamics (Euler integration) ──
+        # ── Payload swing dynamics (Semi-implicit / Symplectic Euler) ──
         l = self.params["cable_length"]
         g = self.params["gravity"]
+        c = self.params["payload_damping"]  # damping coefficient
         ps = self.payload_states  # (n, 4)
         gx     = ps[:, 0]
         gy     = ps[:, 1]
         gx_dot = ps[:, 2]
         gy_dot = ps[:, 3]
 
-        ax_plat = accel[:, 0]  # platform accel x
-        ay_plat = accel[:, 1]  # platform accel y
-        gx_ddot = -torch.cos(gx) * (ax_plat / l) - torch.sin(gx) * (g / l)
-        gy_ddot = -torch.cos(gy) * (ay_plat / l) - torch.sin(gy) * (g / l)
+        ax_plat = accel[:, 0]
+        ay_plat = accel[:, 1]
 
-        new_gx     = gx + gx_dot * dt
-        new_gy     = gy + gy_dot * dt
+        # Swing accelerations: pendulum + platform forcing + damping
+        gx_ddot = -(g / l) * torch.sin(gx) - (ax_plat / l) * torch.cos(gx) - c * gx_dot
+        gy_ddot = -(g / l) * torch.sin(gy) - (ay_plat / l) * torch.cos(gy) - c * gy_dot
+
+        # Semi-implicit Euler: update velocity first, then position with new velocity
         new_gx_dot = gx_dot + gx_ddot * dt
         new_gy_dot = gy_dot + gy_ddot * dt
+        new_gx     = gx + new_gx_dot * dt
+        new_gy     = gy + new_gy_dot * dt
         self.payload_states = torch.stack([new_gx, new_gy, new_gx_dot, new_gy_dot], dim=-1)
 
         self._step_count += 1
