@@ -1,11 +1,13 @@
 """
-Swarm environment — 4D Bounding Circle approach.
+Swarm environment — 4D Bounding Circle approach + Payload swing.
 
 Each swarm is modeled as a point mass with a large bounding circle
 (r_swarm = 0.4 m) that safely encompasses the 3-drone triangle formation.
+A payload is attached via a cable and swings under platform acceleration.
 
-State:   [px, py, vx, vy]        (4D)
-Control: [ax, ay]                 (2D)
+Agent State: [px, py, vx, vy]          (4D)
+Payload:     [γ_x, γ_y, γ̇_x, γ̇_y]    (4D, side-channel)
+Control:     [ax, ay]                  (2D)
 Dynamics: Standard double integrator (translation only).
 Safety:  Bounding circle collision (CoM distance < 2 * r_swarm).
 """
@@ -61,6 +63,10 @@ class SwarmIntegrator:
         "u_max": 0.3,
         "v_max": 1.0,
         "R_form": 0.3,   # kept for visualization of triangle
+        # Payload parameters
+        "cable_length": 1.0,     # l (m)
+        "gravity": 9.81,         # g (m/s^2)
+        "gamma_max": 0.25,       # max swing angle (rad)
     }
 
     def __init__(
@@ -94,6 +100,7 @@ class SwarmIntegrator:
         self._obstacle_states: Optional[torch.Tensor] = None
         self.agent_states: Optional[torch.Tensor] = None
         self.goal_states: Optional[torch.Tensor] = None
+        self.payload_states: Optional[torch.Tensor] = None  # (n, 4)
         self._step_count = 0
 
     # ── Properties ────────────────────────────────────────────────────
@@ -167,6 +174,7 @@ class SwarmIntegrator:
             np.concatenate([goal_pos, np.zeros((n, 2))], axis=1),
             dtype=torch.float32,
         )
+        self.payload_states = torch.zeros(n, 4, dtype=torch.float32)
         self._step_count = 0
 
     def _sample_free_positions(self, rng, count, margin):
@@ -222,6 +230,27 @@ class SwarmIntegrator:
             new_vel = torch.clamp(new_vel, -v_max, v_max)
 
         self.agent_states = torch.cat([new_pos, new_vel], dim=-1)
+
+        # ── Payload swing dynamics (Euler integration) ──
+        l = self.params["cable_length"]
+        g = self.params["gravity"]
+        ps = self.payload_states  # (n, 4)
+        gx     = ps[:, 0]
+        gy     = ps[:, 1]
+        gx_dot = ps[:, 2]
+        gy_dot = ps[:, 3]
+
+        ax_plat = accel[:, 0]  # platform accel x
+        ay_plat = accel[:, 1]  # platform accel y
+        gx_ddot = -torch.cos(gx) * (ax_plat / l) - torch.sin(gx) * (g / l)
+        gy_ddot = -torch.cos(gy) * (ay_plat / l) - torch.sin(gy) * (g / l)
+
+        new_gx     = gx + gx_dot * dt
+        new_gy     = gy + gy_dot * dt
+        new_gx_dot = gx_dot + gx_ddot * dt
+        new_gy_dot = gy_dot + gy_ddot * dt
+        self.payload_states = torch.stack([new_gx, new_gy, new_gx_dot, new_gy_dot], dim=-1)
+
         self._step_count += 1
         return self.agent_states, {"done": self._step_count >= self.max_steps}
 

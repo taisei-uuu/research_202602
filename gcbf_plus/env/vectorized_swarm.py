@@ -1,11 +1,12 @@
 """
-Vectorized (batched) swarm environment — 4D Bounding Circle.
+Vectorized (batched) swarm environment — 4D Bounding Circle + Payload.
 
 All B environments run in parallel on GPU using (B, n_agents, 4) state
 tensors.  Bounding circle safety (r_swarm = 0.4).
 
-State:   [px, py, vx, vy]  (4D)
-Control: [ax, ay]           (2D)
+Agent State: [px, py, vx, vy]          (4D)
+Payload:     [γ_x, γ_y, γ̇_x, γ̇_y]    (4D, side-channel — not in GNN)
+Control:     [ax, ay]                  (2D)
 """
 
 from __future__ import annotations
@@ -47,6 +48,10 @@ class VectorizedSwarmEnv:
         "u_max": 0.3,
         "v_max": 1.0,
         "R_form": 0.3,
+        # Payload parameters
+        "cable_length": 1.0,     # l (m)
+        "gravity": 9.81,         # g (m/s^2)
+        "gamma_max": 0.25,       # max swing angle (rad)
     }
 
     def __init__(
@@ -84,6 +89,7 @@ class VectorizedSwarmEnv:
         self._obstacle_centers: Optional[torch.Tensor] = None
         self._obstacle_half_sizes: Optional[torch.Tensor] = None
         self._obstacle_states: Optional[torch.Tensor] = None
+        self._payload_states: Optional[torch.Tensor] = None  # (B, n, 4): [γ_x, γ_y, γ̇_x, γ̇_y]
         self._step_count = 0
 
     @property
@@ -114,6 +120,11 @@ class VectorizedSwarmEnv:
     def g_x_matrix(self) -> np.ndarray:
         m = self.params["mass"]
         return np.array([[0, 0], [0, 0], [1/m, 0], [0, 1/m]], dtype=np.float32)
+
+    @property
+    def payload_states(self) -> torch.Tensor:
+        """(B, n, 4): [γ_x, γ_y, γ̇_x, γ̇_y]."""
+        return self._payload_states
 
     # ── Reset ─────────────────────────────────────────────────────────
     def reset(self, device: torch.device, seed: Optional[int] = None):
@@ -160,6 +171,7 @@ class VectorizedSwarmEnv:
 
         self._agent_states = torch.tensor(agent_4d, dtype=torch.float32, device=device)
         self._goal_states = torch.tensor(goal_4d, dtype=torch.float32, device=device)
+        self._payload_states = torch.zeros(B, n, 4, dtype=torch.float32, device=device)
         self._K = self._K.to(device)
 
     def _sample_free_pos(self, rng, count, margin, batch_idx):
@@ -210,6 +222,29 @@ class VectorizedSwarmEnv:
             new_vel = torch.clamp(new_vel, -v_max, v_max)
 
         self._agent_states = torch.cat([new_pos, new_vel], dim=-1)
+
+        # ── Payload swing dynamics (Euler integration) ──
+        l = self.params["cable_length"]
+        g = self.params["gravity"]
+        ps = self._payload_states  # (B, n, 4)
+        gx     = ps[:, :, 0]     # γ_x
+        gy     = ps[:, :, 1]     # γ_y
+        gx_dot = ps[:, :, 2]     # γ̇_x
+        gy_dot = ps[:, :, 3]     # γ̇_y
+
+        # Swing accelerations (linearised pendulum driven by platform acceleration)
+        # action is force; accel = action/m is the platform acceleration
+        ax = accel[:, :, 0]  # platform accel x
+        ay = accel[:, :, 1]  # platform accel y
+        gx_ddot = -torch.cos(gx) * (ax / l) - torch.sin(gx) * (g / l)
+        gy_ddot = -torch.cos(gy) * (ay / l) - torch.sin(gy) * (g / l)
+
+        new_gx     = gx + gx_dot * dt
+        new_gy     = gy + gy_dot * dt
+        new_gx_dot = gx_dot + gx_ddot * dt
+        new_gy_dot = gy_dot + gy_ddot * dt
+        self._payload_states = torch.stack([new_gx, new_gy, new_gx_dot, new_gy_dot], dim=-1)
+
         self._step_count += 1
 
     # ── Nominal controller (LQR) ─────────────────────────────────────

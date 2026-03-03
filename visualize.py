@@ -140,8 +140,11 @@ def run_simulation(
     env.reset(seed=seed)
 
     trajectories: List[np.ndarray] = []
+    payload_trajectories: List[np.ndarray] = []
     # Save FULL 4D state into trajectories for heatmap evaluation
     trajectories.append(env.agent_states.detach().numpy().copy())
+    if hasattr(env, 'payload_states') and env.payload_states is not None:
+        payload_trajectories.append(env.payload_states.detach().numpy().copy())
 
     goals = env.goal_states.detach().numpy().copy()  # Full 4D
     obstacle_info = [(obs.center.numpy().copy(), obs.half_size.numpy().copy())
@@ -159,14 +162,18 @@ def run_simulation(
 
         _, info = env.step(u)
         trajectories.append(env.agent_states.detach().numpy().copy())
+        if hasattr(env, 'payload_states') and env.payload_states is not None:
+            payload_trajectories.append(env.payload_states.detach().numpy().copy())
         if info["done"]:
             break
 
     trajectories = np.array(trajectories)
+    payload_traj = np.array(payload_trajectories) if len(payload_trajectories) > 0 else None
     displacement = np.linalg.norm(trajectories[-1, :, :2] - trajectories[0, :, :2], axis=1)
     print(f"  Agent displacements: {displacement}")
 
-    return trajectories, goals, obstacle_info, area_size, comm_radius, mode, is_swarm, R_form, r_swarm, gcbf_net
+    cable_length = env.params.get("cable_length", 1.0) if hasattr(env, 'params') else 1.0
+    return trajectories, goals, obstacle_info, area_size, comm_radius, mode, is_swarm, R_form, r_swarm, gcbf_net, payload_traj, cable_length
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -179,6 +186,7 @@ def create_video(
     mode="lqr", comm_radius=1.5,
     is_swarm=False, R_form=0.3, r_swarm=0.4,
     gcbf_net=None, heatmap=False, grid_res=40,
+    payload_traj=None, cable_length=1.0,
 ):
     n_agents = trajectories.shape[1]
     total_frames = trajectories.shape[0]
@@ -287,6 +295,19 @@ def create_video(
         ax.add_patch(sc)
         sensing_circles.append(sc)
 
+    # Payload rendering (bob + cable)
+    payload_dots = []
+    payload_cables = []
+    if is_swarm and payload_traj is not None:
+        for i in range(n_agents):
+            (pdot,) = ax.plot([], [], marker="o", markersize=6,
+                              markerfacecolor="#343a40", markeredgecolor="white",
+                              markeredgewidth=1.0, zorder=10)
+            payload_dots.append(pdot)
+            (cable,) = ax.plot([], [], color="#6c757d", linewidth=1.2,
+                               linestyle="-", alpha=0.7, zorder=9)
+            payload_cables.append(cable)
+
     entity_name = "swarms" if is_swarm else "agents"
     mode_label = "Trained Policy π(x)" if mode == "trained_policy" else "LQR Controller"
     step_text = ax.text(
@@ -354,13 +375,9 @@ def create_video(
                 states_t = trajectories[sim_step]  # (n_agents, 4)
                 
                 # Batched evaluation
-                # Create a batch of size N_grid where each sample is the entire n_agents state
                 states_batch = torch.tensor(states_t, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4).clone()
-                
                 grid_tensor = torch.tensor(grid_pts, dtype=torch.float32, device=dev)
-                
-                # For each grid point, we ONLY change the position of the focal agent (Agent 0)
-                # The other agents remain exactly where they actually are in this timestep
+                # Focal agent is Agent 0
                 states_batch[:, 0, :2] = grid_tensor
                 
                 goals_batch = torch.tensor(goals, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4)
@@ -368,7 +385,7 @@ def create_video(
                 if len(obstacle_info) > 0:
                     obs_list = []
                     for (c, hs) in obstacle_info:
-                        obs_list.append(np.concatenate([c, hs]))
+                        obs_list.append(np.concatenate([c, [0.0, 0.0]])) # fix: zero velocity for obstacles
                     obs_t = torch.tensor(np.array(obs_list), dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, len(obstacle_info), 4)
                 else:
                     obs_t = None
@@ -386,8 +403,15 @@ def create_video(
                 h_out_agents = h_out_agents.reshape(N_grid, n_agents)
                 h_agent0 = h_out_agents[:, 0].cpu().numpy().reshape(grid_res, grid_res)
                 
-                contour = ax.contourf(X_grid, Y_grid, h_agent0, levels=np.linspace(-0.5, 0.5, 21), cmap="RdBu", extend="both", zorder=0, alpha=0.6)
-                contour_line = ax.contour(X_grid, Y_grid, h_agent0, levels=[0.0], colors='black', linewidths=1.5, zorder=0)
+                # Mask out areas beyond actual communication radius to prevent random contour lines
+                true_p0 = states_t[0, :2]
+                dist_grid = np.linalg.norm(grid_pts - true_p0, axis=1).reshape(grid_res, grid_res)
+                h_agent0[dist_grid > comm_radius] = np.nan
+                
+                # h < 0 is Unsafe (warm/red), h > 0 is Safe (cold/blue)
+                # 'RdBu' naturally puts low values as Red and high values as Blue.
+                contour = ax.contourf(X_grid, Y_grid, h_agent0, levels=np.linspace(-0.5, 0.5, 41), cmap="RdBu", extend="both", zorder=0, alpha=0.5)
+                contour_line = ax.contour(X_grid, Y_grid, h_agent0, levels=[0.0], colors='black', linewidths=2.0, zorder=0)
                 
                 contour_col[0] = contour
                 contour_col[1] = contour_line
@@ -408,6 +432,19 @@ def create_video(
                 bounding_circles[i].center = (cx, cy)
             else:
                 current_dots[i].set_data([cx], [cy])
+
+        # ── Update Payload ──
+        if is_swarm and payload_traj is not None and sim_step < payload_traj.shape[0]:
+            for i in range(n_agents):
+                cx = trajectories[sim_step, i, 0]
+                cy = trajectories[sim_step, i, 1]
+                gx = payload_traj[sim_step, i, 0]  # gamma_x
+                gy = payload_traj[sim_step, i, 1]  # gamma_y
+                # Payload position: offset from CoM by cable_length * sin(gamma)
+                px_pay = cx + cable_length * np.sin(gx)
+                py_pay = cy + cable_length * np.sin(gy)
+                payload_dots[i].set_data([px_pay], [py_pay])
+                payload_cables[i].set_data([cx, px_pay], [cy, py_pay])
 
         step_text.set_text(f"Step {sim_step}/{total_frames - 1}  [{mode_label}]")
         return []
@@ -431,7 +468,8 @@ def create_video(
 def plot_trajectories(
     trajectories, goals, obstacle_info, area_size,
     save_path="trajectories.png", mode="lqr", comm_radius=1.5,
-    is_swarm=False, R_form=0.3, r_swarm=0.4, gcbf_net=None, heatmap=False, grid_res=40
+    is_swarm=False, R_form=0.3, r_swarm=0.4, gcbf_net=None, heatmap=False, grid_res=40,
+    payload_traj=None, cable_length=1.0,
 ):
     n_agents = trajectories.shape[1]
     colors = [AGENT_COLORS[i % len(AGENT_COLORS)] for i in range(n_agents)]
@@ -454,20 +492,16 @@ def plot_trajectories(
         grid_pts = np.c_[X_grid.ravel(), Y_grid.ravel()]
         N_grid = len(grid_pts)
         
-            # Batched evaluation
+        with torch.no_grad():
             states_t = trajectories[-1]  # Final state
             states_batch = torch.tensor(states_t, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4).clone()
-            
             grid_tensor = torch.tensor(grid_pts, dtype=torch.float32, device=dev)
-            
-            # For each grid point, change only the focal agent (Agent 0) position
             states_batch[:, 0, :2] = grid_tensor
-            
             goals_batch = torch.tensor(goals, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4)
             if len(obstacle_info) > 0:
                 obs_list = []
                 for (c, hs) in obstacle_info:
-                    obs_list.append(np.concatenate([c, hs]))
+                    obs_list.append(np.concatenate([c, [0.0, 0.0]])) # fix: zero velocity for obstacles
                 obs_t = torch.tensor(np.array(obs_list), dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, len(obstacle_info), 4)
             else:
                 obs_t = None
@@ -482,8 +516,13 @@ def plot_trajectories(
             h_out_agents = h_out_agents.reshape(N_grid, n_agents)
             h_agent0 = h_out_agents[:, 0].cpu().numpy().reshape(grid_res, grid_res)
             
-            ax.contourf(X_grid, Y_grid, h_agent0, levels=np.linspace(-0.5, 0.5, 21), cmap="RdBu", extend="both", zorder=0, alpha=0.6)
-            ax.contour(X_grid, Y_grid, h_agent0, levels=[0.0], colors='black', linewidths=1.5, zorder=0)
+            # Mask out areas beyond actual communication radius to prevent random contour lines
+            true_p0 = states_t[0, :2]
+            dist_grid = np.linalg.norm(grid_pts - true_p0, axis=1).reshape(grid_res, grid_res)
+            h_agent0[dist_grid > comm_radius] = np.nan
+            
+            contour = ax.contourf(X_grid, Y_grid, h_agent0, levels=np.linspace(-0.5, 0.5, 41), cmap="RdBu", extend="both", zorder=0, alpha=0.5)
+            contour_line = ax.contour(X_grid, Y_grid, h_agent0, levels=[0.0], colors='black', linewidths=2.0, zorder=0)
 
     # Obstacles
     for center, half_size in obstacle_info:
@@ -629,7 +668,7 @@ def main():
         seed=args.seed, checkpoint_path=args.checkpoint,
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
     )
-    trajectories, goals, obstacle_info, area, comm_r, mode, is_swarm, R_form, r_swarm, gcbf_net = result
+    trajectories, goals, obstacle_info, area, comm_r, mode, is_swarm, R_form, r_swarm, gcbf_net, payload_traj, cable_length = result
     entity = "swarms" if is_swarm else "agents"
     print(f"  Recorded {trajectories.shape[0]} frames for "
           f"{trajectories.shape[1]} {entity}.  Mode: {mode}")
@@ -638,7 +677,8 @@ def main():
         trajectories=trajectories, goals=goals, obstacle_info=obstacle_info,
         area_size=area, mode=mode, comm_radius=comm_r,
         is_swarm=is_swarm, R_form=R_form, r_swarm=r_swarm,
-        gcbf_net=gcbf_net, heatmap=args.heatmap, grid_res=args.grid_res
+        gcbf_net=gcbf_net, heatmap=args.heatmap, grid_res=args.grid_res,
+        payload_traj=payload_traj, cable_length=cable_length,
     )
 
     if args.save.endswith(".mp4"):
