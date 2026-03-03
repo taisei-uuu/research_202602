@@ -40,18 +40,18 @@ class VectorizedSwarmEnv:
     """
 
     DEFAULT_PARAMS: Dict[str, Any] = {
-        "r_swarm": 0.4,
-        "comm_radius": 2.0,
+        "r_swarm": 0.7,
+        "comm_radius": 3.0,
         "n_obs": 2,
-        "obs_len_range": (0.1, 0.3),
+        "obs_len_range": (0.2, 0.6),
         "mass": 0.1,
         "u_max": 0.3,
         "v_max": 1.0,
-        "R_form": 0.3,
+        "R_form": 0.5,
         # Payload parameters
         "cable_length": 1.0,     # l (m)
         "gravity": 9.81,         # g (m/s^2)
-        "gamma_max": 0.25,       # max swing angle (rad)
+        "gamma_max": 0.75,       # max swing angle (rad) — arcsin(r_swarm/l) with margin
     }
 
     def __init__(

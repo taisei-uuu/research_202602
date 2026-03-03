@@ -45,7 +45,7 @@ def extract_agent_outputs(
 
 def train(
     num_agents: int = 3,
-    area_size: float = 4.0,
+    area_size: float = 8.0,
     n_obs: int = 6,
     num_steps: int = 10000,
     batch_size: int = 256,
@@ -79,7 +79,7 @@ def train(
         num_agents=num_agents,
         batch_size=batch_size,
         area_size=area_size,
-        params={"comm_radius": 2.0, "n_obs": n_obs},
+        params={"n_obs": n_obs},
     )
 
     # ---- Networks (4D state, 4D edges, 2D action) ----
@@ -353,6 +353,8 @@ def train(
             "R_form": vec_env.params["R_form"],
             "n_obs": n_obs,
             "dt": vec_env.dt,
+            "cable_length": vec_env.params["cable_length"],
+            "gamma_max": vec_env.params["gamma_max"],
         },
         "history": history,
     }
