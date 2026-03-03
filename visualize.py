@@ -107,7 +107,7 @@ def run_simulation(
     r_swarm = 0.7
     comm_radius = 3.0 if swarm_lqr else 1.5
     if swarm_lqr:
-        area_size = max(area_size, 8.0)  # swarm needs larger area for spacing
+        area_size = max(area_size, 15.0)  # swarm needs larger area for spacing
 
     if checkpoint_path is not None:
         policy_net, gcbf_net, cfg = load_trained_policy(checkpoint_path)

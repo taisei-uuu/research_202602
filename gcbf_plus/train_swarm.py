@@ -45,7 +45,7 @@ def extract_agent_outputs(
 
 def train(
     num_agents: int = 3,
-    area_size: float = 8.0,
+    area_size: float = 15.0,
     n_obs: int = 6,
     num_steps: int = 10000,
     batch_size: int = 256,
