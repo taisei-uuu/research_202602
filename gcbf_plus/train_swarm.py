@@ -156,6 +156,44 @@ def train(
 
                 u_ref = vec_env.nominal_controller()
                 u = 2.0 * pi_agents.reshape(batch_size, num_agents, 2) + u_ref
+
+                # ── Lightweight HOCBF filter (per-axis projection) ──
+                ps = vec_env.payload_states  # (B, n, 4)
+                gx_c = ps[:, :, 0]; gy_c = ps[:, :, 1]
+                gxd_c = ps[:, :, 2]; gyd_c = ps[:, :, 3]
+                l_c = cable_length; g_c = gravity; c_c = payload_damping
+                a1_c = hocbf_alpha1; a2_c = hocbf_alpha2
+
+                # X-axis HOCBF
+                h1x = gamma_max**2 - gx_c**2
+                h1dx = -2 * gx_c * gxd_c
+                h2x = h1dx + a1_c * h1x
+                Cx = 2 * gx_c * torch.cos(gx_c) / l_c
+                Dx = (2 * gxd_c**2
+                      - 2 * gx_c * (-(g_c / l_c) * torch.sin(gx_c) - c_c * gxd_c)
+                      + a1_c * (-2 * gx_c * gxd_c)
+                      - a2_c * h2x)
+
+                # Y-axis HOCBF
+                h1y = gamma_max**2 - gy_c**2
+                h1dy = -2 * gy_c * gyd_c
+                h2y = h1dy + a1_c * h1y
+                Cy = 2 * gy_c * torch.cos(gy_c) / l_c
+                Dy = (2 * gyd_c**2
+                      - 2 * gy_c * (-(g_c / l_c) * torch.sin(gy_c) - c_c * gyd_c)
+                      + a1_c * (-2 * gy_c * gyd_c)
+                      - a2_c * h2y)
+
+                # Project: if Cx*ux < Dx, set ux = Dx/Cx (where |Cx| > eps)
+                ux = u[:, :, 0]
+                uy = u[:, :, 1]
+                eps_c = 1e-6
+                violate_x = (Cx * ux < Dx) & (Cx.abs() > eps_c)
+                ux = torch.where(violate_x, Dx / Cx, ux)
+                violate_y = (Cy * uy < Dy) & (Cy.abs() > eps_c)
+                uy = torch.where(violate_y, Dy / Cy, uy)
+                u = torch.stack([ux, uy], dim=-1)
+
                 vec_env.step(u)
 
         # Safe labels
