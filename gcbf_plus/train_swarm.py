@@ -357,9 +357,14 @@ def train(
 
         if step % log_interval == 0 or step == 1:
             elapsed = time.time() - t_start
-            # Max payload swing angle across all agents and batches
+            # Payload swing angle statistics
             with torch.no_grad():
-                max_gamma = torch.stack(all_payload_states).abs().max().item()
+                all_ps = torch.stack(all_payload_states)  # (T, B, n, 4)
+                gamma_abs = torch.sqrt(all_ps[:, :, :, 0]**2 + all_ps[:, :, :, 1]**2)  # combined angle
+                max_gamma = gamma_abs.max().item()
+                mean_gamma = gamma_abs.mean().item()
+                p95_gamma = torch.quantile(gamma_abs.float(), 0.95).item()
+                viol_rate = (gamma_abs > gamma_max).float().mean().item()
             print(
                 f"  step {step:5d}/{num_steps}"
                 f"  |  loss {info.get('loss/total', 0):.4f}"
@@ -370,7 +375,7 @@ def train(
                 f"  |  acc_s {info.get('acc/safe', 0):.2f}"
                 f"  acc_u {info.get('acc/unsafe', 0):.2f}"
                 f"  acc_h {info.get('acc/h_dot', 0):.2f}"
-                f"  |  γ_max {max_gamma:.3f}"
+                f"  |  γ: mean={mean_gamma:.3f} p95={p95_gamma:.3f} max={max_gamma:.3f} viol={viol_rate:.1%}"
                 f"  |  {elapsed:.1f}s"
             )
             history["step"].append(step)
