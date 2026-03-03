@@ -123,7 +123,7 @@ def train(
     print("=" * 60)
     print(f"  GCBF+ Swarm Training (4D Bounding Circle, vectorized)")
     print(f"  swarms={num_agents}  batch={batch_size}  horizon={horizon}"
-          f"  r_swarm={r_swarm}")
+          f"  r_swarm={r_swarm}  area={area_size}")
     print(f"  State=4D  Action=2D  Edge=4D  Nodes/sample={N_per}")
     print(f"  coef_action={coef_action}  coef_safe={coef_safe}"
           f"  coef_unsafe={coef_unsafe}  coef_h_dot={coef_h_dot}")
