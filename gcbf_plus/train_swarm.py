@@ -366,7 +366,7 @@ def train(
 def main():
     parser = argparse.ArgumentParser(description="Train GCBF+ Swarm (4D bounding circle)")
     parser.add_argument("--num_agents", type=int, default=3)
-    parser.add_argument("--area_size", type=float, default=4.0)
+    parser.add_argument("--area_size", type=float, default=15.0)
     parser.add_argument("--n_obs", type=int, default=6)
     parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--batch_size", type=int, default=256)
