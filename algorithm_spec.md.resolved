@@ -1,75 +1,143 @@
-# GCBF+ スワーム制御アルゴリズム — 技術仕様書
+# GCBF+ with HOCBF: Payload-Aware Safe Swarm Control — Algorithm Specification
 
-## 1. 概要
+## 1. Overview
 
-本システムは **GCBF+ (Graph Control Barrier Function)** フレームワークを用いて、3機ドローンで構成されるスワーム群の分散制御と衝突回避を行うシステムです。
-最新の実装では、計算効率と安定性の観点から「**4Dバウンディングサークル（包含円）モデル**」を採用しています。各スワームは環境内の1ノード（質点モデル）として扱われ、大きな包含円（r_swarm）を考慮することで、詳細なドローン姿勢（ヨー角等）の推定・制御を省きながら群全体の安全を保証します。
+本システムは **GCBF+ (Graph Control Barrier Function)** にペイロード揺れ角制約のための **HOCBF (Higher-Order Control Barrier Function)** を統合し、3機ドローンスワーム群の安全な分散制御を実現します。
+
+**核心**: GNNベースのCBFで**スワーム間衝突回避**を学習し、QPソルバーで**ペイロード揺れ角制約**をリアルタイムに満たしながら、ゴール追従を行います。
 
 ```mermaid
 flowchart LR
-    A["環境状態<br/>(B, n, 4)<br/>[px, py, vx, vy]"] --> B["メガグラフ構築<br/>4D edge features"]
-    B --> C["GNN: CBF h(x)"]
-    B --> D["GNN: Policy π(x)"]
-    C --> E["QP Solver<br/>u_qp"]
-    D --> F["残差アクション<br/>u = 2π + u_ref"]
-    E --> G["損失計算"]
-    F --> G
-    G --> H["Backprop"]
+    subgraph データ収集["Phase 1: データ収集 (no_grad)"]
+        A["環境状態<br/>(B, n, 4)"] --> B["メガグラフ構築"]
+        B --> C["Policy π(x)"]
+        C --> D["u = 2π + u_ref"]
+        D --> E["HOCBFフィルタ"]
+        E --> F["env.step(u)"]
+    end
+    subgraph 学習["Phase 2-7: 学習"]
+        G["状態リシェイプ"] --> H["GNN: h(x) / π(x)"]
+        H --> I["Lie微分 ḣ"]
+        H --> J["QP Solver<br/>(GNN-CBF + HOCBF)"]
+        I --> K["損失計算"]
+        J --> K
+        K --> L["Backprop"]
+    end
+    F -.->|軌跡データ| G
 ```
 
 ---
 
-## 2. スワーム状態と力学（4D Bounding Circle Approach）
+## 2. System Model
 
-### 2.1 状態ベクトル（4D）
+### 2.1 スワーム状態（4D Double Integrator）
 
-各スワーム $i$ は剛体としての重心（CoM）のみを追跡します。
+各スワーム $i$ の重心（CoM）を質点として追跡します。
 
-$$x_i = [p_x,\; p_y,\; v_x,\; v_y]$$
-
-| 成分 | 意味 | 単位 |
-|------|------|------|
-| $p_x, p_y$ | 重心 (CoM) 位置 | m |
-| $v_x, v_y$ | CoM 速度 | m/s |
-
-※以前の構成にあったヨー角($\theta$)と角速度($\omega$)は省略されました。
+$$x_i = [p_x,\; p_y,\; v_x,\; v_y] \in \mathbb{R}^4$$
 
 ### 2.2 制御入力（2D）
 
-$$u_i = [a_x,\; a_y]$$
+$$u_i = [u_x,\; u_y] \in \mathbb{R}^2, \quad |u| \leq u_\text{max}$$
 
-| 成分 | 意味 | 範囲 |
-|------|------|------|
-| $a_x, a_y$ | 並進加速度 | $[-u_\text{max}, u_\text{max}]$ (計算では最大0.3など適宜クリップ) |
+### 2.3 離散時間力学
 
-※角加速度制御は除外されました。
+ダブルインテグレーターの力学をEuler法で離散化:
 
-### 2.3 連続時間力学と離散化
+$$p_{t+1} = p_t + v_t \Delta t + \frac{1}{2} \frac{u}{m} \Delta t^2$$
+$$v_{t+1} = v_t + \frac{u}{m} \Delta t$$
 
-ダブルインテグレーター（2重積分器）の力学方程式を使用します。（$\Delta t = 0.03$, 質量 $m = 0.1$）
+連続時間でのアフィン制御系表現:
 
-$$p_{t+1} = p_t + v_t \Delta t + \frac{1}{2} \frac{a}{m} \Delta t^2$$
-$$v_{t+1} = v_t + \frac{a}{m} \Delta t$$
+$$\dot{x} = f(x) + g(x)u, \quad f(x) = \begin{bmatrix} v_x \\ v_y \\ 0 \\ 0 \end{bmatrix}, \quad g(x) = B = \begin{bmatrix} 0 & 0 \\ 0 & 0 \\ 1/m & 0 \\ 0 & 1/m \end{bmatrix}$$
 
----
+### 2.4 パラメータ一覧
 
-## 3. スワーム幾何学と包含円（Bounding Circle）
-
-各スワームは、内部に3機のドローンを鉛直方向に対して30°傾けたケーブル（長さ $l = 1.0$ m）で中央の質点に接続し、正三角形フォーメーション（外接円半径 $R_\text{form} = 0.5$ m）で配置していると仮想的にみなします。
-衝突判定においては、スワーム全体を覆う**バウンディングサークル（半径 $r_\text{swarm} = 0.7$ m）**を使用します。環境サイズは **8.0 × 8.0 m**、通信半径は $r_\text{comm} = 3.0$ m です。
-
-
-- $R_\text{form} = 0.5 \text{ m}$（ドローン配置の半径 = $l \cdot \sin(30°)$）
-- $r_\text{swarm} = 0.7 \text{ m}$（安全確保のためのスワーム包含半径）
-- 単一の大きな円で包むため、スワーム同士や障害物との衝突判定は、スワーム重心の中心間距離ベースで高速に行われます。
+| パラメータ | 記号 | 値 |
+|---|---|---|
+| タイムステップ | $\Delta t$ | 0.03 s |
+| 質量 | $m$ | 0.1 kg |
+| 最大制御入力 | $u_\text{max}$ | 0.3 N |
+| 最大速度 | $v_\text{max}$ | 1.0 m/s |
+| 環境サイズ | — | 15.0 × 15.0 m |
+| 障害物数 | $n_\text{obs}$ | 6 |
+| 障害物サイズ範囲 | — | 0.2～0.6 m |
 
 ---
 
-## 4. グラフ構造とエッジ特徴
+## 3. Swarm Geometry and Bounding Circle
 
-通信範囲 $R_\text{comm} = 3.0$ 内にあるノード同士をエッジで結びます。
+### 3.1 フォーメーション構成
 
-### 4.1 ノード構成（node_dim=3）
+各スワームは3機のドローンで構成され、鉛直方向に対して**30°傾けたケーブル**（長さ $l = 1.0$ m）で中央のペイロードに接続されます。
+
+$$R_\text{form} = l \cdot \sin(30°) = 0.5 \text{ m}$$
+
+ドローンは正三角形フォーメーション（外接円半径 $R_\text{form}$）で配置されます。
+
+### 3.2 バウンディングサークル
+
+スワーム全体を半径 $r_\text{swarm} = 0.7$ m の円で包含します。衝突判定はこの包含円ベースで行います。
+
+$$r_\text{swarm} = 0.7 \text{ m} > R_\text{form} = 0.5 \text{ m} \quad (\text{マージン 0.2 m})$$
+
+### 3.3 安全条件
+
+- **スワーム間衝突**: CoM間距離 $d_{ij} < 2 r_\text{swarm}$ で衝突と判定
+- **障害物衝突**: 矩形障害物の半サイズに $r_\text{swarm}$ を加えた膨張領域で判定
+- **通信半径**: $R_\text{comm} = 3.0$ m（グラフ構築に使用）
+
+---
+
+## 4. Payload Swing Dynamics
+
+### 4.1 ペイロード状態（4D, サイドチャネル）
+
+各スワームにケーブルで吊り下げられたペイロードの揺れを追跡します。この状態はGNNには入力せず、QPレベルの制約として使用します。
+
+$$\xi_i = [\gamma_x,\; \gamma_y,\; \dot{\gamma}_x,\; \dot{\gamma}_y] \in \mathbb{R}^4$$
+
+| 成分 | 意味 |
+|------|------|
+| $\gamma_x, \gamma_y$ | X/Y方向の揺れ角 (rad) |
+| $\dot{\gamma}_x, \dot{\gamma}_y$ | 揺れ角速度 (rad/s) |
+
+### 4.2 運動方程式（非線形振り子 + ダンピング）
+
+プラットフォーム加速度 $a = u/m$ によって駆動される非線形振り子モデル:
+
+$$\ddot{\gamma}_x = -\frac{g}{l}\sin(\gamma_x) - \frac{a_x}{l}\cos(\gamma_x) - c\dot{\gamma}_x$$
+$$\ddot{\gamma}_y = -\frac{g}{l}\sin(\gamma_y) - \frac{a_y}{l}\cos(\gamma_y) - c\dot{\gamma}_y$$
+
+| パラメータ | 記号 | 値 | 説明 |
+|---|---|---|---|
+| ケーブル長 | $l$ | 1.0 m | — |
+| 重力加速度 | $g$ | 9.81 m/s² | — |
+| ダンピング係数 | $c$ | 0.03 s⁻¹ | 数値安定性のための微小減衰 |
+| 最大揺れ角 | $\gamma_\text{max}$ | 0.75 rad (≈43°) | $\arcsin(r_\text{swarm}/l)$ にマージンを設定 |
+
+### 4.3 数値積分法: Semi-implicit Euler (Symplectic)
+
+エネルギー保存性に優れる**セミインプリシット（シンプレクティック）Euler法**を使用:
+
+$$\dot{\gamma}_{t+1} = \dot{\gamma}_t + \ddot{\gamma}_t \cdot \Delta t \quad \text{（速度を先に更新）}$$
+$$\gamma_{t+1} = \gamma_t + \dot{\gamma}_{t+1} \cdot \Delta t \quad \text{（新速度で位置更新）}$$
+
+明示的Euler法との違い: 速度更新後の新速度を位置更新に使うことで、数値的エネルギー発散を防ぎます。
+
+### 4.4 $\gamma_\text{max}$ の導出
+
+ペイロードの最大水平変位がバウンディングサークル内に収まる条件:
+
+$$l \cdot \sin(\gamma_\text{max}) < r_\text{swarm} \implies \gamma_\text{max} < \arcsin\left(\frac{r_\text{swarm}}{l}\right) = \arcsin(0.7) \approx 0.775 \text{ rad}$$
+
+安全マージンを考慮し $\gamma_\text{max} = 0.75$ rad に設定。
+
+---
+
+## 5. Graph Structure and GNN
+
+### 5.1 ノード構成 (`node_dim = 3`)
 
 | ノード種別 | 特徴量（3D one-hot） | 数 |
 |---|---|---|
@@ -77,119 +145,233 @@ $$v_{t+1} = v_t + \frac{a}{m} \Delta t$$
 | Goal | `[0, 1, 0]` | $n$ |
 | Obstacle | `[0, 0, 1]` | $n_\text{obs}$ |
 
-### 4.2 エッジ特徴量（edge_dim=4）
+ノード総数 per sample: $N = 2n + n_\text{obs}$
 
-すべてのエッジ（Agent-Agent, Obstacle-Agent, Goal-Agent）において、相対的な位置と速度のみをエッジ特徴量として渡します。
+### 5.2 エッジ特徴量 (`edge_dim = 4`)
+
+通信範囲 $R_\text{comm}$ 内のノード対をエッジで接続:
 
 | 次元 | 内容 |
 |------|------|
 | 0–1 | $\Delta p_x, \Delta p_y$ (相対位置) |
 | 2–3 | $\Delta v_x, \Delta v_y$ (相対速度) |
 
----
+### 5.3 ネットワーク構成
 
-## 5. ニューラルネットワーク
+| ネットワーク | 入力 | 出力 | 役割 |
+|---|---|---|---|
+| **GCBFNetwork** $h_\theta(x)$ | グラフ | スカラー $h \in \mathbb{R}$ | CBF値（安全度） |
+| **PolicyNetwork** $\pi_\phi(x)$ | グラフ | $\pi \in \mathbb{R}^2$ | 残差制御入力 |
 
-### 5.1 GCBFネットワーク $h_\theta(x)$ と Policyネットワーク $\pi_\phi(x)$
+両者ともメッセージパッシング型GNN。
 
-両者ともメッセージパッシングによるGNNを使用します。
-- `GCBFNetwork` (`gcbf_net`): 最終出力1次元。スワームの安全度 $h$。
-- `PolicyNetwork` (`policy_net`): 最終出力2次元。各エージェントの残差推論アクション。
+### 5.4 名目制御器（LQR）
 
-### 5.2 名目制御器 $u_\text{ref}$
+離散時間代数リカッチ方程式に基づくLQR:
 
-- 状態 $[p_x, p_y, v_x, v_y]$ に対してLQR（離散時間代数リカッチ方程式に基づく線形二次レギュレータ）適用
-- $u_\text{trans} = -K (x - x_\text{goal})$
+$$u_\text{ref} = -K(x - x_\text{goal}), \quad K \in \mathbb{R}^{2 \times 4}$$
 
----
+最終的なポリシー出力:
 
-## 6. 学習アルゴリズムと損失関数
-
-保守的すぎる挙動を緩和し、より積極的かつ目標に向かう動きを実現するため、ハイパーパラメータの調整を行いました。
-
-### 6.1 損失関数
-
-$$L = c_\text{safe} \cdot L_\text{safe} + c_\text{unsafe} \cdot L_\text{unsafe} + c_\text{ḣ} \cdot L_\text{ḣ} + c_\text{action} \cdot L_\text{action}$$
-
-| 損失項 | 係数 | 目的 |
-|--------|------|------|
-| $L_\text{safe}$ | 1.0 | 安全状態で $h > 0$ |
-| $L_\text{unsafe}$ | 2.0 | 衝突状態で $h < 0$ |
-| $L_\text{ḣ}$ | 0.2 | CBFの微分条件維持（システムが極端に非安全側に遷移しないようにする） |
-| $L_\text{action}$ | **0.5** | (以前の0.01から大幅上昇) Policy出力と QPで求めた最適u_QPのMSE。<br>より目標（名目制御）に従うため、アクションへの追従を重視。 |
-
-### 6.2 学習設定とバッチング
-
-- `double_integrator.py` 系の構造をベースとしたバッチベクトル化 (`build_vectorized_swarm_graph`) を採用
-- `lr_cbf` = 1e-5
-- `lr_actor` = 1e-5 (以前の1e-4から下げ、学習の暴れを抑制しつつ収束を安定化)
-- `batch_size` = 256
-- `horizon` = 32
+$$u = 2\pi_\phi(x) + u_\text{ref}$$
 
 ---
 
-## 7. GCBF 動的ヒートマップ可視化 (`visualize.py`)
+## 6. HOCBF (Higher-Order CBF) Constraint
 
-推論時におけるニューラルネットワークの $h_\theta(x)$ 出力を、スワームの局所的な安全・危険度マップとしてフレームごとに描画する機能が統合されました。
+揺れ角制約 $|\gamma| \leq \gamma_\text{max}$ は制御入力に対して**相対次数2**であるため、2次のCBFを構成します。X/Y方向は独立に計算。
 
-- **仕組み**: 
-  - `visualize.py` 実行時に `--heatmap` を指定。
-  - シミュレーションの各ステップごとに、注目エージェント（Agent 0）の位置を仮想的に空間グリッド（例:`40x40`）全体へ分散配置した巨大なテンソルを生成。
-  - その状態をGNNネットワークに通し、空間全体の $h$ の値をバッチ推論する。
-- **ヒートマップデザイン**:
-  - $h = 0$: 安全境界（黒色の等高線）
-  - $h < 0$: 危険領域（赤系の暖色）
-  - $h > 0$: 安全領域（青系の寒色）
+### 6.1 CBF構築（X方向の例）
 
----
+**1次CBF**:
+$$h_1(\gamma_x) = \gamma_\text{max}^2 - \gamma_x^2$$
 
-## 8. ペイロード揺れ角物理 + HOCBF制約
+**1次CBFの時間微分**:
+$$\dot{h}_1 = -2\gamma_x \dot{\gamma}_x$$
 
-### 8.1 ペイロードモデル
+**2次CBF** (クラスKα関数付き):
+$$h_2 = \dot{h}_1 + \alpha_1 h_1 = -2\gamma_x \dot{\gamma}_x + \alpha_1(\gamma_\text{max}^2 - \gamma_x^2)$$
 
-各スワームにケーブル（長さ $l = 1.0$ m）で吊り下げられたペイロードを追加。ペイロードの揺れ角状態はGNNには入力しない（QPレベルのサイドチャネル制約として使用）。
+### 6.2 QP制約の導出
 
-**追加状態（4D, 環境内部で管理）**:
+$\dot{h}_2 \geq -\alpha_2 h_2$ の条件から:
 
-$$[\gamma_x,\; \gamma_y,\; \dot{\gamma}_x,\; \dot{\gamma}_y]$$
+$$\dot{h}_2 = -2(\dot{\gamma}_x^2 + \gamma_x \ddot{\gamma}_x) + \alpha_1(-2\gamma_x \dot{\gamma}_x)$$
 
-| 成分 | 意味 |
-|------|------|
-| $\gamma_x, \gamma_y$ | X/Y方向の揺れ角 (rad) |
-| $\dot{\gamma}_x, \dot{\gamma}_y$ | 揺れ角速度 (rad/s) |
+$\ddot{\gamma}_x$ に運動方程式を代入し、制御入力 $a_x$ に依存する項と独立な項に分離:
 
-### 8.2 揺れ角力学（近似モデル, Euler積分）
+**制御依存係数** (QP左辺):
+$$C_x = \frac{2\gamma_x \cos(\gamma_x)}{l}$$
 
-制御入力 $u = [u_x, u_y]$ によるプラットフォーム加速度が揺れ角加速度を駆動する:
+**定数項** (QP右辺, ダンピング込み):
+$$D_x = 2\dot{\gamma}_x^2 - 2\gamma_x\left(-\frac{g}{l}\sin(\gamma_x) - c\dot{\gamma}_x\right) + \alpha_1(-2\gamma_x\dot{\gamma}_x) - \alpha_2 h_2$$
 
-$$\ddot{\gamma}_x = -\cos(\gamma_x) \cdot \frac{u_x}{l} - \sin(\gamma_x) \cdot \frac{g}{l}$$
-$$\ddot{\gamma}_y = -\cos(\gamma_y) \cdot \frac{u_y}{l} - \sin(\gamma_y) \cdot \frac{g}{l}$$
-
-パラメータ: $l = 1.0$ m, $g = 9.81$ m/s²
-
-### 8.3 HOCBF (Higher-Order CBF) 制約
-
-揺れ角を $\gamma_\text{max} = 0.25$ rad 以内に制限する2次CBF制約。
-
-**計算ステップ** (X方向, Y方向は独立に同様):
-
-1. $h_1 = \gamma_\text{max}^2 - \gamma_x^2$
-2. $\dot{h}_1 = -2\gamma_x \dot{\gamma}_x$
-3. $h_2 = \dot{h}_1 + \alpha_1 h_1$
-4. QP左辺係数: $C_x = 2\gamma_x \cos(\gamma_x) / l$
-5. QP右辺定数: $D_x = 2\dot{\gamma}_x^2 - 2\gamma_x \sin(\gamma_x)(g/l) + 2\alpha_1 \gamma_x \dot{\gamma}_x - \alpha_2 h_2$
-
-**QP形式** ($A u \leq b$): $-C_x \cdot u_x \leq -D_x$
+**QP不等式制約** ($Au \leq b$ 形式):
+$$-C_x \cdot u_x \leq -D_x \quad \Leftrightarrow \quad C_x \cdot u_x \geq D_x$$
 
 - $\alpha_1 = 2.0$, $\alpha_2 = 2.0$
 
-### 8.4 スラック変数 $\delta$ による緩和
+---
 
-HOCBF制約はGNN-CBFの衝突回避制約と競合する可能性があるため、**ソフト制約**として扱う:
+## 7. QP Solver — Multi-Constraint Architecture
 
-$$\min_u \frac{1}{2}\|u - u_\text{nom}\|^2 + p \sum_k \delta_k^2$$
-$$\text{s.t.} \quad A_k u \leq b_k + \delta_k$$
+### 7.1 最適化問題
 
-- GNN-CBF制約: ハード制約（KKT射影）
-- HOCBF揺れ角制約: ソフト制約（$p = 100.0$）
+各エージェントについて以下のQPを解きます:
 
+$$\min_{u,\delta} \quad \frac{1}{2}\|u - u_\text{nom}\|^2 + p \sum_k \delta_k^2$$
+
+subject to:
+$$L_g h \cdot u + L_f h + \alpha h(x) \geq 0 \quad \text{(GNN-CBF: ハード制約)}$$
+$$C_x \cdot u_x \geq D_x - \delta_1 \quad \text{(HOCBF-X: ソフト制約)}$$
+$$C_y \cdot u_y \geq D_y - \delta_2 \quad \text{(HOCBF-Y: ソフト制約)}$$
+$$-u_\text{max} \leq u \leq u_\text{max} \quad \text{(入力制約)}$$
+
+### 7.2 解法
+
+**GNN-CBF制約 (ハード)**: KKT条件による解析的半空間射影
+$$\lambda = \frac{\max(0, -c)}{||L_g h||^2 + \epsilon}, \quad u^* = u_\text{nom} + \lambda L_g h$$
+ここで $c = L_g h \cdot u_\text{nom} + L_f h + \alpha h$
+
+**HOCBF制約 (ソフト)**: スラック付き逐次射影
+$$\delta^* = \frac{v_k}{1 + p||a_k||^2}, \quad \text{correction} = \frac{v_k \cdot p \cdot ||a_k||^2}{1 + p \cdot ||a_k||^2}$$
+ここで $v_k = a_k \cdot u - b_k$ は制約違反量
+
+**優先順位**: GNN-CBF（衝突回避）> HOCBF（揺れ角制限）。衝突回避が常に優先されます。
+
+| パラメータ | 記号 | 値 |
+|---|---|---|
+| CBF係数 | $\alpha$ | 1.0 |
+| スラックペナルティ | $p$ | 100.0 |
+
+---
+
+## 8. Training Algorithm
+
+### 8.1 全体フロー（7フェーズ）
+
+```
+各学習ステップ:
+  Phase 1: データ収集 (no_grad)
+    - env.reset()
+    - horizon=32 ステップのロールアウト
+    - 各ステップで GNN Policy + LQR → HOCBFフィルタ → env.step()
+    - 状態, ペイロード状態, unsafe マスクを記録
+
+  Phase 2: データ整形
+    - (T×B, n, 4) の行列にリシェイプ
+
+  Phase 3: GNNフォワードパス (with grad)
+    - メガグラフ構築 → h_θ(x), π_φ(x) を計算
+
+  Phase 4: Lie微分計算
+    - ∂h/∂x を autograd で計算
+    - ḣ = (∂h/∂x) · ẋ
+
+  Phase 5: 参照・候補アクション計算
+    - u_ref (LQR), u = 2π + u_ref
+
+  Phase 6: QPソルバー (no_grad)
+    - GNN-CBF制約 + HOCBF制約 → u_qp
+
+  Phase 7: 損失計算 + Backprop
+```
+
+### 8.2 Phase 1: HOCBFフィルタ付きデータ収集
+
+データ収集中、ポリシー出力はHOCBFフィルタを通してからenv.step()に渡します。これにより、ペイロードの揺れ角が $\gamma_\text{max}$ を大幅に超えることを防ぎます。
+
+フィルタロジック（各軸独立）:
+$$\text{if } C_x \cdot u_x < D_x \text{ and } |C_x| > \epsilon: \quad u_x \leftarrow D_x / C_x$$
+
+### 8.3 安全ラベリング
+
+各タイムステップ $t$ について:
+- **unsafe**: `unsafe_mask()`（衝突検出）が `True`
+- **safe**: ステップ $0$ から $t$ までの全ステップで unsafe でない
+
+### 8.4 損失関数
+
+$$L = c_\text{safe} L_\text{safe} + c_\text{unsafe} L_\text{unsafe} + c_{\dot{h}} L_{\dot{h}} + c_\text{action} L_\text{action}$$
+
+| 損失項 | 定義 | 係数 | 目的 |
+|--------|------|------|------|
+| $L_\text{safe}$ | $\mathbb{E}_\text{safe}[\max(0, \epsilon - h)]$ | 1.0 | 安全状態で $h > \epsilon$ |
+| $L_\text{unsafe}$ | $\mathbb{E}_\text{unsafe}[\max(0, h + \epsilon)]$ | 2.0 | 衝突状態で $h < -\epsilon$ |
+| $L_{\dot{h}}$ | $\mathbb{E}[\max(0, -\dot{h} - \alpha h)]$ | 0.2 | CBF不変集合条件 $\dot{h} + \alpha h \geq 0$ |
+| $L_\text{action}$ | $\|u_\text{policy} - u_\text{QP}\|^2$ | 0.5 | ポリシーがQP解を模倣 |
+
+- $\epsilon = 0.02$ (安全マージン)
+
+### 8.5 最適化設定
+
+| パラメータ | 値 |
+|---|---|
+| Optimizer | Adam |
+| CBF学習率 | $1 \times 10^{-5}$ |
+| Policy学習率 | $1 \times 10^{-5}$ |
+| Batch size | 256 |
+| Horizon | 32 ステップ |
+| Gradient clipping | max norm 2.0 |
+| 学習ステップ数 | 3000～10000 |
+
+---
+
+## 9. Inference (Evaluation / Visualization)
+
+推論時は学習済み $h_\theta$, $\pi_\phi$ を用いて、各ステップで:
+
+1. グラフ構築
+2. $\pi_\phi(x)$ でアクション候補計算: $u = 2\pi + u_\text{ref}$
+3. QPソルバーで安全フィルタリング（GNN-CBF + HOCBF）
+4. env.step($u_\text{QP}$)
+
+### 9.1 評価指標
+
+| 指標 | 定義 |
+|---|---|
+| Success Rate | 全エージェントがゴール半径内に到達したエピソードの割合 |
+| Safety Rate | 一度も衝突が起きなかったエピソードの割合 |
+| $\gamma_\text{mean}$ | 合成揺れ角 $\sqrt{\gamma_x^2 + \gamma_y^2}$ の平均 |
+| $\gamma_\text{max}$ | 同上の最大値 |
+| $\gamma_\text{viol}$ | $\gamma > \gamma_\text{max}$ のステップ割合 |
+| Min Dist | エージェント間最小距離 |
+| Control Effort | $\|u\|$ の平均 |
+| Goal Time | 全員がゴール到達した最初のステップ |
+
+### 9.2 比較手法
+
+| 手法 | アクション生成 |
+|---|---|
+| **GCBF+ + HOCBF** (提案手法) | GNN Policy + QP(GNN-CBF hard + HOCBF soft) |
+| **GCBF+ only** | GNN Policy + QP(GNN-CBF hard のみ) |
+| **HOCBF + LQR** | LQR + HOCBFフィルタリング |
+| **LQR only** | LQRのみ（安全フィルタなし） |
+
+---
+
+## 10. GCBF Dynamic Heatmap Visualization
+
+推論時に $h_\theta(x)$ を空間グリッド上で評価し、安全度マップとして描画:
+
+- $h = 0$: 安全境界（黒色等高線）
+- $h < 0$: 危険領域（赤系暖色）
+- $h > 0$: 安全領域（青系寒色）
+
+`--heatmap` フラグで有効化。Agent 0 の位置を仮想的にグリッド上に分散配置し、バッチ推論で $h$ を計算します。
+
+---
+
+## 11. File Structure
+
+| ファイル | 役割 |
+|---|---|
+| `gcbf_plus/env/vectorized_swarm.py` | バッチ化環境（学習用, B×n×4） |
+| `gcbf_plus/env/swarm_integrator.py` | 単一環境（推論/可視化用, n×4） |
+| `gcbf_plus/nn/` | GCBFNetwork, PolicyNetwork |
+| `gcbf_plus/algo/qp_solver_torch.py` | バッチQPソルバー（KKT + スラック射影） |
+| `gcbf_plus/algo/loss.py` | 損失関数 compute_loss() |
+| `gcbf_plus/utils/swarm_graph.py` | グラフ構築ユーティリティ |
+| `gcbf_plus/train_swarm.py` | 学習ループ（7フェーズ） |
+| `visualize.py` | 軌跡アニメーション + ヒートマップ |
+| `evaluate.py` | ベンチマーク評価（プラグイン方式） |
