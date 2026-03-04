@@ -121,6 +121,18 @@ def solve_cbf_qp_batched(
                     u_qp,
                 )
 
+        # ---- Re-project onto CBF hard constraint after soft corrections ----
+        c_re = (Lg_h * u_qp).sum(dim=-1) + Lf_h + alpha * h
+        cbf_broken = c_re < -1e-6
+        if cbf_broken.any():
+            lam_re = torch.relu(-c_re / (Lg_h_norm_sq + 1e-8))
+            u_re = u_qp + lam_re.unsqueeze(-1) * Lg_h
+            u_qp = torch.where(
+                cbf_broken.unsqueeze(-1).expand_as(u_qp),
+                u_re,
+                u_qp,
+            )
+
     # ---- Input bounds (box constraint) ----
     if u_max is not None:
         u_qp = torch.clamp(u_qp, -u_max, u_max)
