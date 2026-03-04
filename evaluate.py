@@ -79,7 +79,7 @@ class GCBFWithHOCBF(MethodController):
 
             # GNN-CBF constraint via QP
             B_mat = torch.tensor(env.g_x_matrix, dtype=torch.float32)
-            h_vals = self.gcbf_net(graph)
+            h_vals = self.gcbf_net(graph).squeeze(-1)
             dh_dx = _numerical_dh_dx(env, self.gcbf_net, h_vals)
             x_dot_f = torch.zeros_like(env.agent_states)
             x_dot_f[:, :2] = env.agent_states[:, 2:4]
@@ -115,7 +115,7 @@ class GCBFOnly(MethodController):
             u_cand = 2.0 * pi_raw + u_ref
 
             B_mat = torch.tensor(env.g_x_matrix, dtype=torch.float32)
-            h_vals = self.gcbf_net(graph)
+            h_vals = self.gcbf_net(graph).squeeze(-1)
             dh_dx = _numerical_dh_dx(env, self.gcbf_net, h_vals)
             x_dot_f = torch.zeros_like(env.agent_states)
             x_dot_f[:, :2] = env.agent_states[:, 2:4]
@@ -227,7 +227,7 @@ def _numerical_dh_dx(env: SwarmIntegrator, gcbf_net, h_vals):
         old_states = env.agent_states
         env.agent_states = perturbed
         graph_p = env._get_graph()
-        h_p = gcbf_net(graph_p)
+        h_p = gcbf_net(graph_p).squeeze(-1)
         env.agent_states = old_states
         dh_dx[:, i] = (h_p - h_vals) / eps
     return dh_dx
@@ -332,7 +332,6 @@ def load_checkpoint(path: str):
     gcbf_net = GCBFNetwork(
         node_dim=cfg["node_dim"],
         edge_dim=cfg["edge_dim"],
-        action_dim=cfg["action_dim"],
         n_agents=cfg["num_agents"],
     )
     gcbf_net.load_state_dict(ckpt["gcbf_net"])
@@ -341,7 +340,7 @@ def load_checkpoint(path: str):
     policy_net = PolicyNetwork(
         node_dim=cfg["node_dim"],
         edge_dim=cfg["edge_dim"],
-        action_dim=cfg["action_dim"],
+        action_dim=cfg.get("action_dim", 2),
         n_agents=cfg["num_agents"],
     )
     policy_net.load_state_dict(ckpt["policy_net"])
