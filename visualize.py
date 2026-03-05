@@ -4,7 +4,7 @@ Visualization: Animate multi-agent trajectories as an MP4 video.
 
 Supports:
   1. DoubleIntegrator (single agent dots)
-  2. SwarmIntegrator  (3-drone triangle formations + bounding circles)
+  2. SwarmIntegrator  (3-drone triangle formations + dynamic bounding circles)
 
 Usage (Colab):
     # LQR mode (single agent)
@@ -13,11 +13,8 @@ Usage (Colab):
     # Swarm LQR (no training)
     !python visualize.py --swarm_lqr --num_agents 3 --seed 0
 
-    # Trained swarm policy
-    !python visualize.py --checkpoint gcbf_swarm_checkpoint.pt --seed 0
-    
-    # Trained swarm policy with heatmap
-    !python visualize.py --checkpoint gcbf_swarm_checkpoint.pt --seed 0 --heatmap
+    # Trained affine-transform policy
+    !python visualize.py --checkpoint affine_swarm_checkpoint.pt --seed 0
 """
 
 from __future__ import annotations
@@ -34,8 +31,9 @@ import numpy as np
 import torch
 
 from gcbf_plus.env import DoubleIntegrator, SwarmIntegrator
-from gcbf_plus.nn import GCBFNetwork, PolicyNetwork
-from gcbf_plus.utils.swarm_graph import build_vectorized_swarm_graph
+from gcbf_plus.nn import PolicyNetwork
+from gcbf_plus.utils.swarm_graph import build_swarm_graph_from_states
+from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
 from gcbf_plus.train_swarm import extract_agent_outputs
 
 
@@ -47,7 +45,7 @@ AGENT_COLORS = [
 
 
 def compute_triangle_vertices(com_x, com_y, theta, R_form):
-    """Compute 3 vertices of equilateral triangle at (com_x, com_y) with orientation theta."""
+    """Compute 3 vertices of equilateral triangle at (com_x, com_y) with scaled R_form."""
     s32 = math.sqrt(3.0) / 2.0
     local = np.array([
         [R_form, 0.0],
@@ -71,21 +69,14 @@ def load_trained_policy(checkpoint_path: str):
     )
     policy_net.load_state_dict(ckpt["policy_net"])
     policy_net.eval()
-    
-    gcbf_net = GCBFNetwork(
-        node_dim=cfg["node_dim"],
-        edge_dim=cfg["edge_dim"],
-        n_agents=cfg["num_agents"],
-    )
-    gcbf_net.load_state_dict(ckpt["gcbf_net"])
-    gcbf_net.eval()
-    
-    print(f"  Loaded trained policy and GCBF from: {checkpoint_path}")
+
+    print(f"  Loaded trained policy from: {checkpoint_path}")
     print(f"    agents={cfg['num_agents']}  area={cfg['area_size']}  "
           f"n_obs={cfg['n_obs']}  dt={cfg['dt']}  comm_radius={cfg['comm_radius']}")
-    if "r_swarm" in cfg:
-        print(f"    r_swarm={cfg['r_swarm']}  R_form={cfg.get('R_form', 'N/A')}")
-    return policy_net, gcbf_net, cfg
+    arch = cfg.get("architecture", "unknown")
+    print(f"    architecture={arch}  R_form={cfg.get('R_form', 'N/A')}"
+          f"  s_min={cfg.get('s_min', 'N/A')}  s_max={cfg.get('s_max', 'N/A')}")
+    return policy_net, cfg
 
 
 def run_simulation(
@@ -100,36 +91,41 @@ def run_simulation(
     swarm_lqr: bool = False,
 ):
     policy_net = None
-    gcbf_net = None
     mode = "lqr"
     is_swarm = swarm_lqr
     R_form = 0.5
-    r_swarm = 0.7
+    r_margin = 0.2
     comm_radius = 3.0 if swarm_lqr else 1.5
+    s_min = 0.4
+    s_max = 1.5
+    cfg = None
+
     if swarm_lqr:
-        area_size = max(area_size, 15.0)  # swarm needs larger area for spacing
+        area_size = max(area_size, 15.0)
 
     if checkpoint_path is not None:
-        policy_net, gcbf_net, cfg = load_trained_policy(checkpoint_path)
+        policy_net, cfg = load_trained_policy(checkpoint_path)
         num_agents = cfg["num_agents"]
         area_size = cfg["area_size"]
         n_obs = cfg["n_obs"]
         dt = cfg["dt"]
         comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
-        is_swarm = "r_swarm" in cfg
-        R_form = cfg.get("R_form", 0.3)
-        r_swarm = cfg.get("r_swarm", 0.4)
+        is_swarm = cfg.get("architecture") == "affine_transform" or "R_form" in cfg
+        R_form = cfg.get("R_form", 0.5)
+        r_margin = cfg.get("r_margin", 0.2)
+        s_min = cfg.get("s_min", 0.4)
+        s_max = cfg.get("s_max", 1.5)
         if force_lqr:
             print("  [force_lqr] Ignoring trained policy — using LQR only")
             policy_net = None
-            gcbf_net = None
             mode = "lqr"
 
     if is_swarm:
         env = SwarmIntegrator(
             num_agents=num_agents, area_size=area_size, dt=dt, max_steps=max_steps,
-            params={"n_obs": n_obs, "comm_radius": comm_radius, "R_form": R_form},
+            params={"n_obs": n_obs, "comm_radius": comm_radius, "R_form": R_form,
+                    "r_margin": r_margin, "s_min": s_min, "s_max": s_max},
         )
     else:
         env = DoubleIntegrator(
@@ -141,12 +137,14 @@ def run_simulation(
 
     trajectories: List[np.ndarray] = []
     payload_trajectories: List[np.ndarray] = []
-    # Save FULL 4D state into trajectories for heatmap evaluation
+    scale_trajectories: List[np.ndarray] = []
     trajectories.append(env.agent_states.detach().numpy().copy())
     if hasattr(env, 'payload_states') and env.payload_states is not None:
         payload_trajectories.append(env.payload_states.detach().numpy().copy())
+    if hasattr(env, 'scale_states') and env.scale_states is not None:
+        scale_trajectories.append(env.scale_states.detach().numpy().copy())
 
-    goals = env.goal_states.detach().numpy().copy()  # Full 4D
+    goals = env.goal_states.detach().numpy().copy()
     obstacle_info = [(obs.center.numpy().copy(), obs.half_size.numpy().copy())
                      for obs in env._obstacles]
 
@@ -154,9 +152,45 @@ def run_simulation(
         if policy_net is not None:
             with torch.no_grad():
                 graph = env._get_graph()
-                u_ref = env.nominal_controller()
-                pi_raw = policy_net(graph)
-                u = 2.0 * pi_raw + u_ref
+                u_ref = env.nominal_controller()  # (n, 3)
+                pi_raw = policy_net(graph)  # (n, 3)
+                u = u_ref + pi_raw
+
+                # Apply QP
+                pos = env.agent_states[:, :2]
+                vel = env.agent_states[:, 2:4]
+                sc = env.scale_states[:, 0]
+                sd = env.scale_states[:, 1]
+                ps = env.payload_states
+
+                n_obs_env = len(env._obstacles)
+                if n_obs_env > 0:
+                    oc = torch.stack([obs.center for obs in env._obstacles]).unsqueeze(0).expand(num_agents, -1, -1)
+                    ohs = torch.stack([obs.half_size for obs in env._obstacles]).unsqueeze(0).expand(num_agents, -1, -1)
+                else:
+                    oc = None
+                    ohs = None
+
+                u = solve_affine_qp(
+                    u_at=u,
+                    obs_centers=oc,
+                    obs_half_sizes=ohs,
+                    agent_pos=pos,
+                    agent_vel=vel,
+                    s=sc,
+                    s_dot=sd,
+                    R_form=R_form,
+                    r_margin=r_margin,
+                    mass=env.params["mass"],
+                    s_min=s_min,
+                    s_max=s_max,
+                    payload_states=ps,
+                    cable_length=env.params["cable_length"],
+                    gravity=env.params["gravity"],
+                    gamma_max=env.params["gamma_max"],
+                    payload_damping=env.params["payload_damping"],
+                    u_max=env.params.get("u_max"),
+                )
         else:
             u = env.nominal_controller()
 
@@ -164,16 +198,20 @@ def run_simulation(
         trajectories.append(env.agent_states.detach().numpy().copy())
         if hasattr(env, 'payload_states') and env.payload_states is not None:
             payload_trajectories.append(env.payload_states.detach().numpy().copy())
+        if hasattr(env, 'scale_states') and env.scale_states is not None:
+            scale_trajectories.append(env.scale_states.detach().numpy().copy())
         if info["done"]:
             break
 
     trajectories = np.array(trajectories)
     payload_traj = np.array(payload_trajectories) if len(payload_trajectories) > 0 else None
+    scale_traj = np.array(scale_trajectories) if len(scale_trajectories) > 0 else None
     displacement = np.linalg.norm(trajectories[-1, :, :2] - trajectories[0, :, :2], axis=1)
     print(f"  Agent displacements: {displacement}")
 
     cable_length = env.params.get("cable_length", 1.0) if hasattr(env, 'params') else 1.0
-    return trajectories, goals, obstacle_info, area_size, comm_radius, mode, is_swarm, R_form, r_swarm, gcbf_net, payload_traj, cable_length
+    return (trajectories, goals, obstacle_info, area_size, comm_radius, mode,
+            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -184,9 +222,8 @@ def create_video(
     trajectories, goals, obstacle_info, area_size,
     save_path="trajectories.mp4", fps=30, skip=1,
     mode="lqr", comm_radius=1.5,
-    is_swarm=False, R_form=0.3, r_swarm=0.4,
-    gcbf_net=None, heatmap=False, grid_res=40,
-    payload_traj=None, cable_length=1.0,
+    is_swarm=False, R_form=0.3, r_margin=0.2,
+    payload_traj=None, cable_length=1.0, scale_traj=None,
 ):
     n_agents = trajectories.shape[1]
     total_frames = trajectories.shape[0]
@@ -203,20 +240,6 @@ def create_video(
     ax.set_ylim(-0.3, area_size + 0.3)
     ax.set_aspect("equal")
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4, color="#adb5bd")
-
-    # Optional Heatmap setup
-    X_grid, Y_grid = None, None
-    grid_pts = None
-    N_grid = 0
-    contour_col = [None, None]  # [contourf, contourlines]
-    dev = next(gcbf_net.parameters()).device if gcbf_net is not None else torch.device("cpu")
-    
-    if heatmap and gcbf_net is not None and is_swarm:
-        grid_x = np.linspace(-0.3, area_size + 0.3, grid_res)
-        grid_y = np.linspace(-0.3, area_size + 0.3, grid_res)
-        X_grid, Y_grid = np.meshgrid(grid_x, grid_y)
-        grid_pts = np.c_[X_grid.ravel(), Y_grid.ravel()]
-        N_grid = len(grid_pts)
 
     # Obstacles
     for center, half_size in obstacle_info:
@@ -253,28 +276,25 @@ def create_video(
         (line,) = ax.plot([], [], color=colors[i], linewidth=1.8, alpha=0.75, zorder=4)
         trail_lines.append(line)
 
-    # Current position: triangle + bounding circle (swarm) or dot (single)
     swarm_triangles = []
     bounding_circles = []
     current_dots = []
 
     if is_swarm:
         for i in range(n_agents):
-            # Triangle formation
             tri = Polygon(np.zeros((3, 2)), closed=True,
                           facecolor=colors[i], edgecolor="white",
                           linewidth=1.5, alpha=0.6, zorder=8)
             ax.add_patch(tri)
             swarm_triangles.append(tri)
-            # Drone dots at vertices
             for k in range(3):
                 (d,) = ax.plot([], [], marker="o", markersize=5,
                                markerfacecolor="white",
                                markeredgecolor=colors[i],
                                markeredgewidth=1.2, zorder=9)
                 current_dots.append(d)
-            # Bounding circle (r_swarm) — the safety zone
-            bc = plt.Circle((0, 0), r_swarm, fill=True,
+            # Dynamic bounding circle (radius updated per frame)
+            bc = plt.Circle((0, 0), R_form + r_margin, fill=True,
                             facecolor=colors[i], edgecolor=colors[i],
                             linewidth=1.5, alpha=0.12, linestyle="-", zorder=6)
             ax.add_patch(bc)
@@ -287,7 +307,7 @@ def create_video(
                              zorder=8)
             current_dots.append(dot)
 
-    # Sensing radius (dashed)
+    # Sensing radius
     sensing_circles = []
     for i in range(n_agents):
         sc = plt.Circle((0, 0), comm_radius, fill=False, linestyle="--",
@@ -295,7 +315,7 @@ def create_video(
         ax.add_patch(sc)
         sensing_circles.append(sc)
 
-    # Payload rendering (bob + cable)
+    # Payload rendering
     payload_dots = []
     payload_cables = []
     if is_swarm and payload_traj is not None:
@@ -316,9 +336,8 @@ def create_video(
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), zorder=15,
     )
 
-    title_add = " w/ Heatmap (Agent 0)" if heatmap else ""
     ax.set_title(
-        f"{'Swarm' if is_swarm else 'Agent'} Trajectories" + title_add + "\n"
+        f"{'Swarm' if is_swarm else 'Agent'} Trajectories\n"
         f"({n_agents} {entity_name} · {mode_label})",
         fontsize=14, fontweight="bold", pad=12,
     )
@@ -337,9 +356,9 @@ def create_video(
                                   alpha=0.65, label="Obstacle"))
     if is_swarm:
         handles.append(mpatches.Patch(facecolor="gray", edgecolor="white",
-                                      alpha=0.5, label=f"Formation △ (R={R_form})"))
+                                      alpha=0.5, label=f"Formation △ (R×s)"))
         handles.append(mpatches.Patch(facecolor="gray", edgecolor="gray",
-                                      alpha=0.2, label=f"Safety ○ (r={r_swarm})"))
+                                      alpha=0.2, label=f"Safety ○ (R×s+m)"))
     ax.legend(handles=handles, loc="upper right", fontsize=9,
               framealpha=0.9, edgecolor="#dee2e6")
 
@@ -352,71 +371,7 @@ def create_video(
 
     def update(frame_idx):
         sim_step = frame_indices[frame_idx]
-        
-        # ── Rendering Heatmap ──
-        if heatmap and gcbf_net is not None and is_swarm:
-            if contour_col[0] is not None:
-                if hasattr(contour_col[0], 'collections'):
-                    for coll in contour_col[0].collections:
-                        coll.remove()
-                else:
-                    contour_col[0].remove()
-                contour_col[0] = None
-                
-            if contour_col[1] is not None:
-                if hasattr(contour_col[1], 'collections'):
-                    for coll in contour_col[1].collections:
-                        coll.remove()
-                else:
-                    contour_col[1].remove()
-                contour_col[1] = None
-                
-            with torch.no_grad():
-                states_t = trajectories[sim_step]  # (n_agents, 4)
-                
-                # Batched evaluation
-                states_batch = torch.tensor(states_t, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4).clone()
-                grid_tensor = torch.tensor(grid_pts, dtype=torch.float32, device=dev)
-                # Focal agent is Agent 0
-                states_batch[:, 0, :2] = grid_tensor
-                
-                goals_batch = torch.tensor(goals, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4)
-                
-                if len(obstacle_info) > 0:
-                    obs_list = []
-                    for (c, hs) in obstacle_info:
-                        obs_list.append(np.concatenate([c, [0.0, 0.0]])) # fix: zero velocity for obstacles
-                    obs_t = torch.tensor(np.array(obs_list), dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, len(obstacle_info), 4)
-                else:
-                    obs_t = None
-                
-                graph = build_vectorized_swarm_graph(states_batch, goals_batch, obs_t, comm_radius, 3, 4)
-                
-                # GCBFNetwork.forward() normally slices out `[:self.n_agents]`. 
-                # Since we passed a mega-graph with (N_grid * N_per) nodes, and we want 
-                # the outputs for all `N_grid * n_agents` agent nodes, we temporarily override it.
-                original_n_agents = gcbf_net.n_agents
-                gcbf_net.n_agents = N_grid * n_agents
-                h_out_agents = gcbf_net(graph).squeeze(-1) # (N_grid * n_agents)
-                gcbf_net.n_agents = original_n_agents
-                
-                h_out_agents = h_out_agents.reshape(N_grid, n_agents)
-                h_agent0 = h_out_agents[:, 0].cpu().numpy().reshape(grid_res, grid_res)
-                
-                # Mask out areas beyond actual communication radius to prevent random contour lines
-                true_p0 = states_t[0, :2]
-                dist_grid = np.linalg.norm(grid_pts - true_p0, axis=1).reshape(grid_res, grid_res)
-                h_agent0[dist_grid > comm_radius] = np.nan
-                
-                # h < 0 is Unsafe (warm/red), h > 0 is Safe (cold/blue)
-                # 'RdBu' naturally puts low values as Red and high values as Blue.
-                contour = ax.contourf(X_grid, Y_grid, h_agent0, levels=np.linspace(-0.5, 0.5, 41), cmap="RdBu", extend="both", zorder=0, alpha=0.5)
-                contour_line = ax.contour(X_grid, Y_grid, h_agent0, levels=[0.0], colors='black', linewidths=2.0, zorder=0)
-                
-                contour_col[0] = contour
-                contour_col[1] = contour_line
 
-        # ── Update Agents ──
         for i in range(n_agents):
             trail = trajectories[:sim_step + 1, i, :]
             trail_lines[i].set_data(trail[:, 0], trail[:, 1])
@@ -425,28 +380,39 @@ def create_video(
             sensing_circles[i].center = (cx, cy)
 
             if is_swarm:
-                verts = compute_triangle_vertices(cx, cy, 0.0, R_form)
+                # Get current scale
+                s_i = 1.0
+                if scale_traj is not None and sim_step < scale_traj.shape[0]:
+                    s_i = float(scale_traj[sim_step, i, 0])
+
+                scaled_R = R_form * s_i
+                verts = compute_triangle_vertices(cx, cy, 0.0, scaled_R)
                 swarm_triangles[i].set_xy(verts)
                 for k in range(3):
                     current_dots[i * 3 + k].set_data([verts[k, 0]], [verts[k, 1]])
                 bounding_circles[i].center = (cx, cy)
+                bounding_circles[i].set_radius(R_form * s_i + r_margin)
             else:
                 current_dots[i].set_data([cx], [cy])
 
-        # ── Update Payload ──
+        # Payload
         if is_swarm and payload_traj is not None and sim_step < payload_traj.shape[0]:
             for i in range(n_agents):
                 cx = trajectories[sim_step, i, 0]
                 cy = trajectories[sim_step, i, 1]
-                gx = payload_traj[sim_step, i, 0]  # gamma_x
-                gy = payload_traj[sim_step, i, 1]  # gamma_y
-                # Payload position: offset from CoM by cable_length * sin(gamma)
+                gx = payload_traj[sim_step, i, 0]
+                gy = payload_traj[sim_step, i, 1]
                 px_pay = cx + cable_length * np.sin(gx)
                 py_pay = cy + cable_length * np.sin(gy)
                 payload_dots[i].set_data([px_pay], [py_pay])
                 payload_cables[i].set_data([cx, px_pay], [cy, py_pay])
 
-        step_text.set_text(f"Step {sim_step}/{total_frames - 1}  [{mode_label}]")
+        # Step text with scale info
+        scale_info = ""
+        if is_swarm and scale_traj is not None and sim_step < scale_traj.shape[0]:
+            scales = scale_traj[sim_step, :, 0]
+            scale_info = f"  s=[{', '.join(f'{s:.2f}' for s in scales)}]"
+        step_text.set_text(f"Step {sim_step}/{total_frames - 1}  [{mode_label}]{scale_info}")
         return []
 
     anim = animation.FuncAnimation(
@@ -468,8 +434,8 @@ def create_video(
 def plot_trajectories(
     trajectories, goals, obstacle_info, area_size,
     save_path="trajectories.png", mode="lqr", comm_radius=1.5,
-    is_swarm=False, R_form=0.3, r_swarm=0.4, gcbf_net=None, heatmap=False, grid_res=40,
-    payload_traj=None, cable_length=1.0,
+    is_swarm=False, R_form=0.3, r_margin=0.2,
+    payload_traj=None, cable_length=1.0, scale_traj=None,
 ):
     n_agents = trajectories.shape[1]
     colors = [AGENT_COLORS[i % len(AGENT_COLORS)] for i in range(n_agents)]
@@ -482,47 +448,6 @@ def plot_trajectories(
     ax.set_ylim(-0.3, area_size + 0.3)
     ax.set_aspect("equal")
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4, color="#adb5bd")
-
-    # Static Heatmap (uses final position)
-    if heatmap and gcbf_net is not None and is_swarm:
-        dev = next(gcbf_net.parameters()).device
-        grid_x = np.linspace(-0.3, area_size + 0.3, grid_res)
-        grid_y = np.linspace(-0.3, area_size + 0.3, grid_res)
-        X_grid, Y_grid = np.meshgrid(grid_x, grid_y)
-        grid_pts = np.c_[X_grid.ravel(), Y_grid.ravel()]
-        N_grid = len(grid_pts)
-        
-        with torch.no_grad():
-            states_t = trajectories[-1]  # Final state
-            states_batch = torch.tensor(states_t, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4).clone()
-            grid_tensor = torch.tensor(grid_pts, dtype=torch.float32, device=dev)
-            states_batch[:, 0, :2] = grid_tensor
-            goals_batch = torch.tensor(goals, dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, n_agents, 4)
-            if len(obstacle_info) > 0:
-                obs_list = []
-                for (c, hs) in obstacle_info:
-                    obs_list.append(np.concatenate([c, [0.0, 0.0]])) # fix: zero velocity for obstacles
-                obs_t = torch.tensor(np.array(obs_list), dtype=torch.float32, device=dev).unsqueeze(0).expand(N_grid, len(obstacle_info), 4)
-            else:
-                obs_t = None
-            
-            graph = build_vectorized_swarm_graph(states_batch, goals_batch, obs_t, comm_radius, 3, 4)
-            # Temporarily override gcbf_net.n_agents to get all batched agent outputs
-            original_n_agents = gcbf_net.n_agents
-            gcbf_net.n_agents = N_grid * n_agents
-            h_out_agents = gcbf_net(graph).squeeze(-1)
-            gcbf_net.n_agents = original_n_agents
-            
-            h_out_agents = h_out_agents.reshape(N_grid, n_agents)
-            h_agent0 = h_out_agents[:, 0].cpu().numpy().reshape(grid_res, grid_res)
-            
-            # Mask out areas beyond actual communication radius to prevent random contour lines
-            true_p0 = states_t[0, :2]
-            dist_grid = np.linalg.norm(grid_pts - true_p0, axis=1).reshape(grid_res, grid_res)
-            h_agent0[dist_grid > comm_radius] = np.nan
-            
-            contour = ax.contourf(X_grid, Y_grid, h_agent0, levels=np.linspace(-0.5, 0.5, 41), cmap="RdBu", extend="both", zorder=0, alpha=0.5)
-            contour_line = ax.contour(X_grid, Y_grid, h_agent0, levels=[0.0], colors='black', linewidths=2.0, zorder=0)
 
     # Obstacles
     for center, half_size in obstacle_info:
@@ -559,11 +484,15 @@ def plot_trajectories(
                 markerfacecolor=colors[i], markeredgecolor="white",
                 markeredgewidth=1.2, zorder=5)
 
-    # Final positions
+    # Final positions with dynamic scale
     finals = trajectories[-1]
     for i in range(n_agents):
         if is_swarm:
-            verts = compute_triangle_vertices(finals[i, 0], finals[i, 1], 0.0, R_form)
+            s_i = 1.0
+            if scale_traj is not None:
+                s_i = float(scale_traj[-1, i, 0])
+            scaled_R = R_form * s_i
+            verts = compute_triangle_vertices(finals[i, 0], finals[i, 1], 0.0, scaled_R)
             tri = Polygon(verts, closed=True, facecolor=colors[i],
                           edgecolor="white", linewidth=1.5, alpha=0.7, zorder=6)
             ax.add_patch(tri)
@@ -571,12 +500,12 @@ def plot_trajectories(
                 ax.plot(verts[k, 0], verts[k, 1], marker="o", markersize=5,
                         markerfacecolor="white", markeredgecolor=colors[i],
                         markeredgewidth=1.2, zorder=7)
-            bc = plt.Circle((finals[i, 0], finals[i, 1]), r_swarm,
+            bc = plt.Circle((finals[i, 0], finals[i, 1]), R_form * s_i + r_margin,
                             fill=True, facecolor=colors[i], edgecolor=colors[i],
                             linewidth=1.5, alpha=0.12, zorder=3)
             ax.add_patch(bc)
 
-    # Ghost formations along trajectory
+    # Ghost formations
     if is_swarm:
         n_ghosts = min(8, trajectories.shape[0] // 10)
         if n_ghosts > 0:
@@ -584,8 +513,12 @@ def plot_trajectories(
                                         n_ghosts, dtype=int)[1:-1]
             for idx in ghost_indices:
                 for i in range(n_agents):
+                    s_i = 1.0
+                    if scale_traj is not None and idx < scale_traj.shape[0]:
+                        s_i = float(scale_traj[idx, i, 0])
+                    scaled_R = R_form * s_i
                     verts = compute_triangle_vertices(
-                        trajectories[idx, i, 0], trajectories[idx, i, 1], 0.0, R_form
+                        trajectories[idx, i, 0], trajectories[idx, i, 1], 0.0, scaled_R
                     )
                     tri = Polygon(verts, closed=True, facecolor=colors[i],
                                   edgecolor=colors[i], linewidth=0.5,
@@ -599,9 +532,8 @@ def plot_trajectories(
                         edgecolor=colors[i], alpha=0.25, zorder=1)
         ax.add_patch(sc)
 
-    title_add = " w/ Heatmap (Agent 0)" if heatmap else ""
     ax.set_title(
-        f"{'Swarm' if is_swarm else 'Agent'} Trajectories" + title_add + "\n"
+        f"{'Swarm' if is_swarm else 'Agent'} Trajectories\n"
         f"({n_agents} {entity_name}, {trajectories.shape[0]-1} steps · {mode_label})",
         fontsize=14, fontweight="bold", pad=12,
     )
@@ -619,9 +551,9 @@ def plot_trajectories(
                                   alpha=0.65, label="Obstacle"))
     if is_swarm:
         handles.append(mpatches.Patch(facecolor="gray", edgecolor="white",
-                                      alpha=0.5, label=f"Formation △ (R={R_form})"))
+                                      alpha=0.5, label=f"Formation △ (R×s)"))
         handles.append(mpatches.Patch(facecolor="gray", edgecolor="gray",
-                                      alpha=0.2, label=f"Safety ○ (r={r_swarm})"))
+                                      alpha=0.2, label=f"Safety ○ (R×s+m)"))
     ax.legend(handles=handles, loc="upper right", fontsize=9,
               framealpha=0.9, edgecolor="#dee2e6")
 
@@ -654,11 +586,7 @@ def main():
                         help="Run SwarmIntegrator with LQR only")
     parser.add_argument("--force_lqr", action="store_true",
                         help="Ignore trained policy, use LQR only")
-    parser.add_argument("--heatmap", action="store_true",
-                        help="Visualize GCBF values as a heatmap overlay")
-    parser.add_argument("--grid_res", type=int, default=40,
-                        help="Resolution of the heatmap grid (default: 40)")
-    
+
     args = parser.parse_args()
 
     print("Running simulation...")
@@ -668,7 +596,8 @@ def main():
         seed=args.seed, checkpoint_path=args.checkpoint,
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
     )
-    trajectories, goals, obstacle_info, area, comm_r, mode, is_swarm, R_form, r_swarm, gcbf_net, payload_traj, cable_length = result
+    (trajectories, goals, obstacle_info, area, comm_r, mode,
+     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj) = result
     entity = "swarms" if is_swarm else "agents"
     print(f"  Recorded {trajectories.shape[0]} frames for "
           f"{trajectories.shape[1]} {entity}.  Mode: {mode}")
@@ -676,9 +605,9 @@ def main():
     common = dict(
         trajectories=trajectories, goals=goals, obstacle_info=obstacle_info,
         area_size=area, mode=mode, comm_radius=comm_r,
-        is_swarm=is_swarm, R_form=R_form, r_swarm=r_swarm,
-        gcbf_net=gcbf_net, heatmap=args.heatmap, grid_res=args.grid_res,
+        is_swarm=is_swarm, R_form=R_form, r_margin=r_margin,
         payload_traj=payload_traj, cable_length=cable_length,
+        scale_traj=scale_traj,
     )
 
     if args.save.endswith(".mp4"):

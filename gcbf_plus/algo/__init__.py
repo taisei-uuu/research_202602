@@ -1,4 +1,4 @@
-from .qp_solver import solve_cbf_qp
-from .loss import compute_loss
+from .loss import compute_affine_loss
+from .affine_qp_solver import solve_affine_qp
 
-__all__ = ["solve_cbf_qp", "compute_loss"]
+__all__ = ["compute_affine_loss", "solve_affine_qp"]

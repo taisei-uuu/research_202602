@@ -1,12 +1,13 @@
 """
-Vectorized (batched) swarm environment — 4D Bounding Circle + Payload.
+Vectorized (batched) swarm environment — 4D Bounding Circle + Affine Transform + Payload.
 
 All B environments run in parallel on GPU using (B, n_agents, 4) state
-tensors.  Bounding circle safety (r_swarm = 0.4).
+tensors.  Dynamic bounding circle safety with scale factor s.
 
 Agent State: [px, py, vx, vy]          (4D)
+Scale State: [s, s_dot]                (2D per swarm)
 Payload:     [γ_x, γ_y, γ̇_x, γ̇_y]    (4D, side-channel — not in GNN)
-Control:     [ax, ay]                  (2D)
+Control:     [a_cx, a_cy, a_s]         (3D — affine)
 """
 
 from __future__ import annotations
@@ -36,23 +37,27 @@ def _dlqr(A, B, Q, R):
 
 class VectorizedSwarmEnv:
     """
-    Vectorized swarm env — 4D point mass with bounding circle safety.
+    Vectorized swarm env — 4D point mass with affine transform control.
     """
 
     DEFAULT_PARAMS: Dict[str, Any] = {
-        "r_swarm": 0.7,
+        "R_form": 0.5,           # base formation radius (m)
+        "r_margin": 0.2,         # bounding circle margin (m)
         "comm_radius": 3.0,
         "n_obs": 2,
         "obs_len_range": (0.2, 0.6),
         "mass": 0.1,
         "u_max": 0.3,
         "v_max": 1.0,
-        "R_form": 0.5,
+        # Scale limits
+        "s_min": 0.4,
+        "s_max": 1.5,
+        "s_dot_max": 1.0,
         # Payload parameters
-        "cable_length": 1.0,     # l (m)
-        "gravity": 9.81,         # g (m/s^2)
-        "gamma_max": 0.75,       # max swing angle (rad) — arcsin(r_swarm/l) with margin
-        "payload_damping": 0.03,  # small damping for numerical stability (1/s)
+        "cable_length": 1.0,
+        "gravity": 9.81,
+        "gamma_max": 0.75,
+        "payload_damping": 0.03,
     }
 
     def __init__(
@@ -73,7 +78,7 @@ class VectorizedSwarmEnv:
         if params is not None:
             self.params.update(params)
 
-        # LQR gain (4D → 2D)
+        # LQR gain (4D → 2D, translation only)
         m = self.params["mass"]
         A_ct = np.zeros((4, 4), dtype=np.float32)
         A_ct[0, 2] = 1.0
@@ -85,12 +90,13 @@ class VectorizedSwarmEnv:
         self._K = torch.tensor(_dlqr(A_t, B_t, Q_t, R_t), dtype=torch.float32)
 
         # State tensors (set on reset)
-        self._agent_states: Optional[torch.Tensor] = None
-        self._goal_states: Optional[torch.Tensor] = None
+        self._agent_states: Optional[torch.Tensor] = None   # (B, n, 4)
+        self._goal_states: Optional[torch.Tensor] = None    # (B, n, 4)
+        self._scale_states: Optional[torch.Tensor] = None   # (B, n, 2): [s, s_dot]
         self._obstacle_centers: Optional[torch.Tensor] = None
         self._obstacle_half_sizes: Optional[torch.Tensor] = None
         self._obstacle_states: Optional[torch.Tensor] = None
-        self._payload_states: Optional[torch.Tensor] = None  # (B, n, 4): [γ_x, γ_y, γ̇_x, γ̇_y]
+        self._payload_states: Optional[torch.Tensor] = None  # (B, n, 4)
         self._step_count = 0
 
     @property
@@ -99,7 +105,7 @@ class VectorizedSwarmEnv:
 
     @property
     def action_dim(self) -> int:
-        return 2
+        return 3  # [a_cx, a_cy, a_s]
 
     @property
     def node_dim(self) -> int:
@@ -119,6 +125,7 @@ class VectorizedSwarmEnv:
 
     @property
     def g_x_matrix(self) -> np.ndarray:
+        """Control input matrix for translation only (4x2)."""
         m = self.params["mass"]
         return np.array([[0, 0], [0, 0], [1/m, 0], [0, 1/m]], dtype=np.float32)
 
@@ -127,14 +134,25 @@ class VectorizedSwarmEnv:
         """(B, n, 4): [γ_x, γ_y, γ̇_x, γ̇_y]."""
         return self._payload_states
 
+    @property
+    def scale_states(self) -> torch.Tensor:
+        """(B, n, 2): [s, s_dot]."""
+        return self._scale_states
+
+    def r_swarm(self, s: torch.Tensor) -> torch.Tensor:
+        """Dynamic bounding circle radius: R_form * s + margin."""
+        R_form = self.params["R_form"]
+        margin = self.params["r_margin"]
+        return R_form * s + margin
+
     # ── Reset ─────────────────────────────────────────────────────────
     def reset(self, device: torch.device, seed: Optional[int] = None):
         rng = np.random.default_rng(seed)
         B = self.batch_size
         n = self.num_agents
         area = self.area_size
-        r_swarm = self.params["r_swarm"]
-        margin = r_swarm + 0.1
+        r_init = self.params["R_form"] * 1.0 + self.params["r_margin"]
+        margin = r_init + 0.1
         n_obs = self.params["n_obs"]
         obs_lo, obs_hi = self.params.get("obs_len_range", (0.1, 0.3))
         self._step_count = 0
@@ -172,20 +190,23 @@ class VectorizedSwarmEnv:
 
         self._agent_states = torch.tensor(agent_4d, dtype=torch.float32, device=device)
         self._goal_states = torch.tensor(goal_4d, dtype=torch.float32, device=device)
+        # Scale states: [s=1.0, s_dot=0.0] for all agents in all batches
+        self._scale_states = torch.zeros(B, n, 2, dtype=torch.float32, device=device)
+        self._scale_states[:, :, 0] = 1.0  # s = 1.0
         self._payload_states = torch.zeros(B, n, 4, dtype=torch.float32, device=device)
         self._K = self._K.to(device)
 
     def _sample_free_pos(self, rng, count, margin, batch_idx):
-        """Sample positions avoiding obstacles AND >= 2*r_swarm apart."""
+        """Sample positions avoiding obstacles AND >= 2*r_swarm(s=1) apart."""
         area = self.area_size
-        min_dist = 2 * self.params["r_swarm"]
+        r_init = self.params["R_form"] * 1.0 + self.params["r_margin"]
+        min_dist = 2 * r_init
         positions = []
         for _ in range(100_000):
             if len(positions) >= count:
                 break
             p = rng.uniform(margin, area - margin, size=2).astype(np.float32)
             ok = True
-            # Obstacle check
             if self._obstacle_centers is not None:
                 oc = self._obstacle_centers[batch_idx].cpu().numpy()
                 ohs = self._obstacle_half_sizes[batch_idx].cpu().numpy() + margin
@@ -195,7 +216,6 @@ class VectorizedSwarmEnv:
                         break
             if not ok:
                 continue
-            # Inter-agent distance check
             for existing in positions:
                 if np.linalg.norm(p - existing) < min_dist:
                     ok = False
@@ -206,43 +226,63 @@ class VectorizedSwarmEnv:
 
     # ── Step ──────────────────────────────────────────────────────────
     def step(self, action: torch.Tensor):
-        """action: (B, n, 2)."""
+        """action: (B, n, 3) — [a_cx, a_cy, a_s] per swarm."""
         m = self.params["mass"]
         dt = self.dt
         u_max = self.params.get("u_max")
         v_max = self.params.get("v_max")
+        s_dot_max = self.params.get("s_dot_max", 1.0)
+
+        # Split affine parameters
+        a_trans = action[:, :, :2]   # (B, n, 2) translation
+        a_s = action[:, :, 2]        # (B, n)    scale acceleration
 
         if u_max is not None:
-            action = torch.clamp(action, -u_max, u_max)
+            a_trans = torch.clamp(a_trans, -u_max, u_max)
 
-        accel = action / m
+        # ── Translation dynamics ──
+        accel = a_trans / m
         x = self._agent_states
         new_pos = x[:, :, :2] + x[:, :, 2:4] * dt + 0.5 * accel * dt**2
         new_vel = x[:, :, 2:4] + accel * dt
         if v_max is not None:
             new_vel = torch.clamp(new_vel, -v_max, v_max)
-
         self._agent_states = torch.cat([new_pos, new_vel], dim=-1)
 
-        # ── Payload swing dynamics (Semi-implicit / Symplectic Euler) ──
+        # ── Scale dynamics ──
+        s = self._scale_states[:, :, 0]       # (B, n)
+        s_dot = self._scale_states[:, :, 1]   # (B, n)
+        new_s_dot = s_dot + a_s * dt
+        new_s_dot = torch.clamp(new_s_dot, -s_dot_max, s_dot_max)
+        new_s = s + new_s_dot * dt
+        s_min = self.params["s_min"]
+        s_max = self.params["s_max"]
+        new_s = torch.clamp(new_s, s_min, s_max)
+        # Zero out velocity at limits
+        new_s_dot = torch.where(
+            (new_s <= s_min) & (new_s_dot < 0), torch.zeros_like(new_s_dot), new_s_dot
+        )
+        new_s_dot = torch.where(
+            (new_s >= s_max) & (new_s_dot > 0), torch.zeros_like(new_s_dot), new_s_dot
+        )
+        self._scale_states = torch.stack([new_s, new_s_dot], dim=-1)
+
+        # ── Payload swing dynamics (Semi-implicit Euler) ──
         l = self.params["cable_length"]
         g = self.params["gravity"]
-        c = self.params["payload_damping"]  # damping coefficient
-        ps = self._payload_states  # (B, n, 4)
-        gx     = ps[:, :, 0]     # γ_x
-        gy     = ps[:, :, 1]     # γ_y
-        gx_dot = ps[:, :, 2]     # γ̇_x
-        gy_dot = ps[:, :, 3]     # γ̇_y
+        c = self.params["payload_damping"]
+        ps = self._payload_states
+        gx     = ps[:, :, 0]
+        gy     = ps[:, :, 1]
+        gx_dot = ps[:, :, 2]
+        gy_dot = ps[:, :, 3]
 
-        # Platform acceleration
         ax = accel[:, :, 0]
         ay = accel[:, :, 1]
 
-        # Swing accelerations: pendulum + platform forcing + damping
         gx_ddot = -(g / l) * torch.sin(gx) - (ax / l) * torch.cos(gx) - c * gx_dot
         gy_ddot = -(g / l) * torch.sin(gy) - (ay / l) * torch.cos(gy) - c * gy_dot
 
-        # Semi-implicit Euler: update velocity first, then position with new velocity
         new_gx_dot = gx_dot + gx_ddot * dt
         new_gy_dot = gy_dot + gy_ddot * dt
         new_gx     = gx + new_gx_dot * dt
@@ -251,43 +291,51 @@ class VectorizedSwarmEnv:
 
         self._step_count += 1
 
-    # ── Nominal controller (LQR) ─────────────────────────────────────
+    # ── Nominal controller (LQR for translation, zero scale) ─────────
     def nominal_controller(self) -> torch.Tensor:
-        """Returns (B, n, 2)."""
+        """Returns (B, n, 3): [a_cx, a_cy, 0]."""
         err = self._agent_states - self._goal_states  # (B, n, 4)
-        u = -torch.einsum("...j,ij->...i", err, self._K)  # (B, n, 2)
+        u_trans = -torch.einsum("...j,ij->...i", err, self._K)  # (B, n, 2)
         u_max = self.params.get("u_max")
         if u_max is not None:
-            u = torch.clamp(u, -u_max, u_max)
+            u_trans = torch.clamp(u_trans, -u_max, u_max)
+        # Append zero scale acceleration
+        B, n = u_trans.shape[:2]
+        u = torch.cat([u_trans, torch.zeros(B, n, 1, device=u_trans.device)], dim=-1)
         return u
 
-    # ── Unsafe mask (bounding circle) ─────────────────────────────────
+    # ── Unsafe mask (dynamic bounding circle) ─────────────────────────
     def unsafe_mask(self) -> torch.Tensor:
         """Returns (B, n) bool."""
         B = self.batch_size
         n = self.num_agents
-        r_swarm = self.params["r_swarm"]
         device = self._agent_states.device
 
         pos = self._agent_states[:, :, :2]  # (B, n, 2)
-        agent_collision = torch.zeros(B, n, dtype=torch.bool, device=device)
+        s = self._scale_states[:, :, 0]     # (B, n)
+        r = self.r_swarm(s)                 # (B, n) — per-agent dynamic radius
 
+        agent_collision = torch.zeros(B, n, dtype=torch.bool, device=device)
         if n > 1:
             diff = pos.unsqueeze(2) - pos.unsqueeze(1)  # (B, n, n, 2)
             dist = torch.norm(diff, dim=-1)              # (B, n, n)
             dist = dist + torch.eye(n, device=device).unsqueeze(0) * 1e6
-            collision_matrix = dist < 2 * r_swarm
+            # Dynamic collision threshold: r_i + r_j
+            thresh = r.unsqueeze(2) + r.unsqueeze(1)    # (B, n, n)
+            collision_matrix = dist < thresh
             agent_collision = collision_matrix.any(dim=2)
 
         obs_collision = torch.zeros(B, n, dtype=torch.bool, device=device)
         if self._obstacle_centers is not None and self._obstacle_centers.shape[1] > 0:
             n_obs = self._obstacle_centers.shape[1]
-            # pos: (B, n, 2) vs obs: (B, n_obs, 2)
             dp = pos.unsqueeze(2)                                        # (B, n, 1, 2)
             oc = self._obstacle_centers.unsqueeze(1)                     # (B, 1, n_obs, 2)
-            ohs = self._obstacle_half_sizes.unsqueeze(1) + r_swarm      # (B, 1, n_obs, 2)
+            # Per-agent radius: r (B, n) → (B, n, 1)
+            r_exp = r.unsqueeze(2)                                       # (B, n, 1)
+            ohs_base = self._obstacle_half_sizes.unsqueeze(1)            # (B, 1, n_obs, 2)
             diff_obs = torch.abs(dp - oc)                                # (B, n, n_obs, 2)
-            inside = (diff_obs[..., 0] < ohs[..., 0]) & (diff_obs[..., 1] < ohs[..., 1])
+            inside = (diff_obs[..., 0] < (ohs_base[..., 0] + r_exp)) & \
+                     (diff_obs[..., 1] < (ohs_base[..., 1] + r_exp))
             obs_collision = inside.any(dim=-1)  # (B, n)
 
         return agent_collision | obs_collision

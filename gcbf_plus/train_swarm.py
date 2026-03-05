@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-GCBF+ Training Loop — Swarm variant (4D Bounding Circle, VECTORIZED).
+Affine-Transform Swarm Training Loop (Vectorized).
 
-Simplified from 6D rigid body to 4D point mass with r_swarm = 0.4 bounding
-circle.  Functionally identical to the baseline DoubleIntegrator training
-but with a larger effective collision radius.
+Architecture:
+    GNN π(x) → affine offset [Δa_cx, Δa_cy, a_s]
+    u_AT = u_nom + π(x)
+    Analytical QP (Obs-CBF + Scale-CBF + HOCBF) → u_QP
+    env.step(u_QP)
 
-  State:  4D [px, py, vx, vy]
-  Action: 2D [ax, ay]
-  Edges:  4D [Δpx, Δpy, Δvx, Δvy]
+Loss:
+    L_goal:  Goal-reaching incentive
+    L_qp:   QP-intervention penalty
+    L_reg:  Action regularization
 
 Usage:
     python -m gcbf_plus.train_swarm --num_agents 3 --num_steps 10000
@@ -24,9 +27,9 @@ import numpy as np
 import torch
 
 from gcbf_plus.env.vectorized_swarm import VectorizedSwarmEnv
-from gcbf_plus.nn import GCBFNetwork, PolicyNetwork
-from gcbf_plus.algo.loss import compute_loss
-from gcbf_plus.algo.qp_solver_torch import solve_cbf_qp_batched
+from gcbf_plus.nn import PolicyNetwork
+from gcbf_plus.algo.loss import compute_affine_loss
+from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
 from gcbf_plus.utils.swarm_graph import build_vectorized_swarm_graph
 
 
@@ -50,21 +53,17 @@ def train(
     num_steps: int = 10000,
     batch_size: int = 256,
     horizon: int = 32,
-    lr_cbf: float = 1e-5,
-    lr_actor: float = 1e-5,
-    alpha: float = 1.0,
-    eps: float = 0.02,
-    coef_safe: float = 1.0,
-    coef_unsafe: float = 2.0,
-    coef_h_dot: float = 0.2,
-    coef_action: float = 0.5,
+    lr_actor: float = 1e-4,
+    coef_goal: float = 1.0,
+    coef_qp: float = 2.0,
+    coef_reg: float = 0.01,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
-    checkpoint_path: str = "gcbf_swarm_checkpoint.pt",
+    checkpoint_path: str = "affine_swarm_checkpoint.pt",
     device: str = "auto",
 ) -> Dict[str, list]:
-    """Train GCBF+ swarm networks (4D bounding circle, vectorized)."""
+    """Train affine-transform swarm policy (vectorized)."""
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -82,28 +81,24 @@ def train(
         params={"n_obs": n_obs},
     )
 
-    # ---- Networks (4D state, 4D edges, 2D action) ----
-    gcbf_net = GCBFNetwork(
-        node_dim=vec_env.node_dim,    # 3
-        edge_dim=vec_env.edge_dim,    # 4
-        n_agents=num_agents,
-    ).to(dev)
+    # ---- Network (GNN outputs 3D affine offset) ----
     policy_net = PolicyNetwork(
         node_dim=vec_env.node_dim,    # 3
         edge_dim=vec_env.edge_dim,    # 4
-        action_dim=vec_env.action_dim,  # 2
+        action_dim=vec_env.action_dim,  # 3: [Δa_cx, Δa_cy, a_s]
         n_agents=num_agents,
     ).to(dev)
 
-    optim_cbf = torch.optim.Adam(gcbf_net.parameters(), lr=lr_cbf)
-    optim_actor = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
+    optim = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
 
     # ---- Constants ----
-    B_mat = torch.tensor(vec_env.g_x_matrix, dtype=torch.float32, device=dev)  # (4, 2)
     K_mat = vec_env._K.to(dev)  # (2, 4)
     mass = vec_env.params["mass"]
     u_max = vec_env.params.get("u_max")
-    r_swarm = vec_env.params["r_swarm"]
+    R_form = vec_env.params["R_form"]
+    r_margin = vec_env.params["r_margin"]
+    s_min = vec_env.params["s_min"]
+    s_max = vec_env.params["s_max"]
     N_per = num_agents * 2 + n_obs
     T_loss = horizon - 1
 
@@ -112,22 +107,19 @@ def train(
     gravity = vec_env.params["gravity"]
     gamma_max = vec_env.params["gamma_max"]
     payload_damping = vec_env.params["payload_damping"]
-    hocbf_alpha1 = 2.0
-    hocbf_alpha2 = 2.0
 
     history: Dict[str, list] = {
-        "step": [], "loss/total": [], "loss/safe": [], "loss/unsafe": [],
-        "loss/h_dot": [], "loss/action": [], "acc/safe": [], "acc/unsafe": [],
-        "acc/h_dot": [],
+        "step": [], "loss/total": [], "loss/goal": [],
+        "loss/qp": [], "loss/reg": [],
     }
 
     print("=" * 60)
-    print(f"  GCBF+ Swarm Training (4D Bounding Circle, vectorized)")
+    print(f"  Affine-Transform Swarm Training (Vectorized)")
     print(f"  swarms={num_agents}  batch={batch_size}  horizon={horizon}"
-          f"  r_swarm={r_swarm}  area={area_size}")
-    print(f"  State=4D  Action=2D  Edge=4D  Nodes/sample={N_per}")
-    print(f"  coef_action={coef_action}  coef_safe={coef_safe}"
-          f"  coef_unsafe={coef_unsafe}  coef_h_dot={coef_h_dot}")
+          f"  area={area_size}")
+    print(f"  State=4D  Action=3D(affine)  Edge=4D  Nodes/sample={N_per}")
+    print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
+    print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}  coef_reg={coef_reg}")
     print("=" * 60)
     t_start = time.time()
 
@@ -141,89 +133,88 @@ def train(
         obs_fixed = vec_env._obstacle_states.clone()
 
         all_agent_states = []
+        all_scale_states = []
         all_payload_states = []
-        all_unsafe = []
+        all_pi_outputs = []     # Store GNN outputs for gradient phase
+
+        # Also store obstacle info for QP
+        obs_centers = vec_env._obstacle_centers.clone() if vec_env._obstacle_centers is not None else None
+        obs_half_sizes = vec_env._obstacle_half_sizes.clone() if vec_env._obstacle_half_sizes is not None else None
 
         with torch.no_grad():
             for t in range(horizon):
                 all_agent_states.append(vec_env._agent_states.clone())
-                all_payload_states.append(vec_env.payload_states.clone())
-                all_unsafe.append(vec_env.unsafe_mask())
+                all_scale_states.append(vec_env._scale_states.clone())
+                all_payload_states.append(vec_env._payload_states.clone())
 
+                # Build graph and get GNN output
                 mega = vec_env.build_batch_graph()
                 pi_all = policy_net.gnn_layers[0](mega)
                 pi_agents = extract_agent_outputs(pi_all, num_agents, N_per, batch_size)
+                pi_agents = pi_agents.reshape(batch_size, num_agents, 3)
 
-                u_ref = vec_env.nominal_controller()
-                u = 2.0 * pi_agents.reshape(batch_size, num_agents, 2) + u_ref
+                # Nominal control (LQR for translation + zero scale)
+                u_ref = vec_env.nominal_controller()  # (B, n, 3)
 
-                # ── Lightweight HOCBF filter (per-axis projection) ──
-                ps = vec_env.payload_states  # (B, n, 4)
-                gx_c = ps[:, :, 0]; gy_c = ps[:, :, 1]
-                gxd_c = ps[:, :, 2]; gyd_c = ps[:, :, 3]
-                l_c = cable_length; g_c = gravity; c_c = payload_damping
-                a1_c = hocbf_alpha1; a2_c = hocbf_alpha2
+                # u_AT = u_nom + π(x)
+                u_at = u_ref + pi_agents  # (B, n, 3)
 
-                # X-axis HOCBF
-                h1x = gamma_max**2 - gx_c**2
-                h1dx = -2 * gx_c * gxd_c
-                h2x = h1dx + a1_c * h1x
-                Cx = 2 * gx_c * torch.cos(gx_c) / l_c
-                Dx = (2 * gxd_c**2
-                      - 2 * gx_c * (-(g_c / l_c) * torch.sin(gx_c) - c_c * gxd_c)
-                      + a1_c * (-2 * gx_c * gxd_c)
-                      - a2_c * h2x)
+                # Apply QP per-agent (flatten batch and agent dims)
+                BN = batch_size * num_agents
+                u_at_flat = u_at.reshape(BN, 3)
+                pos_flat = vec_env._agent_states[:, :, :2].reshape(BN, 2)
+                vel_flat = vec_env._agent_states[:, :, 2:4].reshape(BN, 2)
+                s_flat = vec_env._scale_states[:, :, 0].reshape(BN)
+                s_dot_flat = vec_env._scale_states[:, :, 1].reshape(BN)
+                ps_flat = vec_env._payload_states.reshape(BN, 4)
 
-                # Y-axis HOCBF
-                h1y = gamma_max**2 - gy_c**2
-                h1dy = -2 * gy_c * gyd_c
-                h2y = h1dy + a1_c * h1y
-                Cy = 2 * gy_c * torch.cos(gy_c) / l_c
-                Dy = (2 * gyd_c**2
-                      - 2 * gy_c * (-(g_c / l_c) * torch.sin(gy_c) - c_c * gyd_c)
-                      + a1_c * (-2 * gy_c * gyd_c)
-                      - a2_c * h2y)
+                # Expand obstacle data per agent
+                if obs_centers is not None:
+                    obs_c_exp = obs_centers.unsqueeze(1).expand(-1, num_agents, -1, -1).reshape(BN, n_obs, 2)
+                    obs_hs_exp = obs_half_sizes.unsqueeze(1).expand(-1, num_agents, -1, -1).reshape(BN, n_obs, 2)
+                else:
+                    obs_c_exp = None
+                    obs_hs_exp = None
 
-                # Project: if Cx*ux < Dx, set ux = Dx/Cx (where |Cx| > eps)
-                ux = u[:, :, 0]
-                uy = u[:, :, 1]
-                eps_c = 1e-6
-                violate_x = (Cx * ux < Dx) & (Cx.abs() > eps_c)
-                ux = torch.where(violate_x, Dx / Cx, ux)
-                violate_y = (Cy * uy < Dy) & (Cy.abs() > eps_c)
-                uy = torch.where(violate_y, Dy / Cy, uy)
-                u = torch.stack([ux, uy], dim=-1)
+                u_qp_flat = solve_affine_qp(
+                    u_at=u_at_flat,
+                    obs_centers=obs_c_exp,
+                    obs_half_sizes=obs_hs_exp,
+                    agent_pos=pos_flat,
+                    agent_vel=vel_flat,
+                    s=s_flat,
+                    s_dot=s_dot_flat,
+                    R_form=R_form,
+                    r_margin=r_margin,
+                    mass=mass,
+                    s_min=s_min,
+                    s_max=s_max,
+                    payload_states=ps_flat,
+                    cable_length=cable_length,
+                    gravity=gravity,
+                    gamma_max=gamma_max,
+                    payload_damping=payload_damping,
+                    u_max=u_max,
+                )
 
-                vec_env.step(u)
-
-        # Safe labels
-        unsafe_stack = torch.stack(all_unsafe)  # (T, B, n)
-        safe_list = []
-        for t in range(horizon):
-            was_ever = unsafe_stack[:t+1].any(dim=0)
-            safe_t = ~was_ever
-            if t == 0:
-                safe_t = torch.ones(batch_size, num_agents, dtype=torch.bool, device=dev)
-            safe_list.append(safe_t)
+                u_qp = u_qp_flat.reshape(batch_size, num_agents, 3)
+                vec_env.step(u_qp)
 
         # ============================================================
         # PHASE 2: Reshape for training
         # ============================================================
         S = T_loss * batch_size
         agent_4d = torch.stack(all_agent_states[:T_loss]).reshape(S, num_agents, 4)
+        scale_2d = torch.stack(all_scale_states[:T_loss]).reshape(S, num_agents, 2)
+        payload_4d = torch.stack(all_payload_states[:T_loss]).reshape(S, num_agents, 4)
         goal_rep = goal_fixed.unsqueeze(0).expand(T_loss, -1, -1, -1).reshape(S, num_agents, 4)
         obs_rep = obs_fixed.unsqueeze(0).expand(T_loss, -1, -1, -1).reshape(S, n_obs, 4)
 
-        safe_flat = torch.stack(safe_list[:T_loss]).reshape(-1)
-        unsafe_flat = torch.stack(all_unsafe[:T_loss]).reshape(-1)
-
         # ============================================================
-        # PHASE 3: Gradient-tracked mega-graph
+        # PHASE 3: Gradient-tracked forward pass
         # ============================================================
-        agent_grad = agent_4d.detach().requires_grad_(True)
-
         mega = build_vectorized_swarm_graph(
-            agent_states=agent_grad,
+            agent_states=agent_4d,
             goal_states=goal_rep,
             obstacle_states=obs_rep,
             comm_radius=vec_env.comm_radius,
@@ -231,136 +222,92 @@ def train(
             edge_dim=vec_env.edge_dim,
         )
 
-        # ============================================================
-        # PHASE 4: GNN forward
-        # ============================================================
-        h_all = gcbf_net.gnn_layers[0](mega)
         pi_all = policy_net.gnn_layers[0](mega)
-
-        h_agents = extract_agent_outputs(h_all, num_agents, N_per, S).squeeze(-1)
         pi_agents = extract_agent_outputs(pi_all, num_agents, N_per, S)
+        pi_agents = pi_agents.reshape(S * num_agents, 3)
 
-        # ============================================================
-        # PHASE 5: u_ref, action, Lie derivative
-        # ============================================================
-        states_flat = agent_grad.reshape(-1, 4)     # (S*n, 4)
+        # u_ref for all samples
+        states_flat = agent_4d.reshape(-1, 4)       # (S*n, 4)
         goals_flat = goal_rep.reshape(-1, 4)
-
-        err = states_flat[:, :4].detach() - goals_flat
+        err = states_flat - goals_flat
         u_ref_flat = -torch.einsum("...j,ij->...i", err, K_mat)  # (S*n, 2)
         if u_max is not None:
             u_ref_flat = torch.clamp(u_ref_flat, -u_max, u_max)
+        # Append zero scale for nominal
+        u_ref_3d = torch.cat([u_ref_flat, torch.zeros(S * num_agents, 1, device=dev)], dim=-1)
 
-        action_flat = 2.0 * pi_agents + u_ref_flat
+        u_at_flat = u_ref_3d + pi_agents  # (S*n, 3)
 
-        # Clamp for dynamics
-        action_c = action_flat.clone()
-        if u_max is not None:
-            action_c = torch.clamp(action_c, -u_max, u_max)
-
-        vel = states_flat[:, 2:4]
-        accel = action_c / mass
-        x_dot = torch.cat([vel, accel], dim=1)  # (S*n, 4)
-
-        # Lie derivative
-        dh_dx_3d = torch.autograd.grad(
-            h_agents.sum(), agent_grad,
-            create_graph=True, retain_graph=True,
-        )[0]
-        dh_dx = dh_dx_3d.reshape(-1, 4)
-        h_dot = (dh_dx * x_dot).sum(dim=-1)
-
-        # ============================================================
-        # PHASE 6: QP solve
-        # ============================================================
+        # QP solve (no grad)
         with torch.no_grad():
-            x_dot_f = torch.zeros_like(states_flat)
-            x_dot_f[:, :2] = states_flat[:, 2:4].detach()
+            pos_flat = agent_4d.reshape(-1, 4)[:, :2]
+            vel_flat = agent_4d.reshape(-1, 4)[:, 2:4]
+            s_flat = scale_2d.reshape(-1, 2)[:, 0]
+            s_dot_flat = scale_2d.reshape(-1, 2)[:, 1]
+            ps_flat = payload_4d.reshape(-1, 4)
 
-            # ── Build HOCBF swing constraints ──
-            payload_flat = torch.stack(all_payload_states[:T_loss]).reshape(S, num_agents, 4)
-            payload_flat = payload_flat.reshape(-1, 4)  # (S*n, 4)
-            gx = payload_flat[:, 0]
-            gy = payload_flat[:, 1]
-            gx_dot = payload_flat[:, 2]
-            gy_dot = payload_flat[:, 3]
+            if obs_centers is not None:
+                # Expand obstacle data: (B, n_obs, 2) → (S, n_obs, 2) → (S*n, n_obs, 2)
+                obs_c_rep = obs_centers.unsqueeze(0).expand(T_loss, -1, -1, -1).reshape(S, n_obs, 2)
+                obs_c_exp = obs_c_rep.unsqueeze(1).expand(-1, num_agents, -1, -1).reshape(S * num_agents, n_obs, 2)
+                obs_hs_rep = obs_half_sizes.unsqueeze(0).expand(T_loss, -1, -1, -1).reshape(S, n_obs, 2)
+                obs_hs_exp = obs_hs_rep.unsqueeze(1).expand(-1, num_agents, -1, -1).reshape(S * num_agents, n_obs, 2)
+            else:
+                obs_c_exp = None
+                obs_hs_exp = None
 
-            l = cable_length
-            g_val = gravity
-            c_damp = payload_damping
-            a1 = hocbf_alpha1
-            a2 = hocbf_alpha2
-
-            # X direction HOCBF (with damping: γ̈ = -(g/l)sin(γ) - (a/l)cos(γ) - c·γ̇)
-            h1_x = gamma_max**2 - gx**2
-            h1_dot_x = -2 * gx * gx_dot
-            h2_x = h1_dot_x + a1 * h1_x
-            # γ̈ = -(g/l)sin(γ) - (a_x/l)cos(γ) - c·γ̇
-            # d(h1_dot_x)/dt = -2*(gx_dot² + gx*γ̈_x)
-            # The control-dependent part: gx * cos(gx) * a_x / l
-            C_x = 2 * gx * torch.cos(gx) / l
-            # The unforced part (including damping):
-            D_x = (2 * gx_dot**2
-                   - 2 * gx * (-(g_val / l) * torch.sin(gx) - c_damp * gx_dot)
-                   + a1 * (-2 * gx * gx_dot)
-                   - a2 * h2_x)
-
-            # Y direction HOCBF (with damping)
-            h1_y = gamma_max**2 - gy**2
-            h1_dot_y = -2 * gy * gy_dot
-            h2_y = h1_dot_y + a1 * h1_y
-            C_y = 2 * gy * torch.cos(gy) / l
-            D_y = (2 * gy_dot**2
-                   - 2 * gy * (-(g_val / l) * torch.sin(gy) - c_damp * gy_dot)
-                   + a1 * (-2 * gy * gy_dot)
-                   - a2 * h2_y)
-
-            # Build A_extra (N, 2, 2) and b_extra (N, 2)
-            # Constraint: C_x * u_x >= D_x  →  -C_x * u_x <= -D_x
-            N_flat = gx.shape[0]
-            A_swing = torch.zeros(N_flat, 2, 2, device=dev)
-            A_swing[:, 0, 0] = -C_x   # X constraint acts on u_x
-            A_swing[:, 1, 1] = -C_y   # Y constraint acts on u_y
-            b_swing = torch.stack([-D_x, -D_y], dim=-1)  # (N, 2)
-
-            u_qp = solve_cbf_qp_batched(
-                u_nom=u_ref_flat,
-                h=h_agents.detach(),
-                dh_dx=dh_dx.detach(),
-                x_dot_f=x_dot_f,
-                B_mat=B_mat,
-                alpha=alpha,
+            u_qp_flat = solve_affine_qp(
+                u_at=u_at_flat.detach(),
+                obs_centers=obs_c_exp,
+                obs_half_sizes=obs_hs_exp,
+                agent_pos=pos_flat,
+                agent_vel=vel_flat,
+                s=s_flat,
+                s_dot=s_dot_flat,
+                R_form=R_form,
+                r_margin=r_margin,
+                mass=mass,
+                s_min=s_min,
+                s_max=s_max,
+                payload_states=ps_flat,
+                cable_length=cable_length,
+                gravity=gravity,
+                gamma_max=gamma_max,
+                payload_damping=payload_damping,
                 u_max=u_max,
-                A_extra=A_swing,
-                b_extra=b_swing,
             )
 
         # ============================================================
-        # PHASE 7: Loss + backprop
+        # PHASE 4: Loss + backprop
         # ============================================================
-        loss, info = compute_loss(
-            h=h_agents, h_dot=h_dot,
-            pi_action=action_flat, u_qp=u_qp,
-            safe_mask=safe_flat, unsafe_mask=unsafe_flat,
-            alpha=alpha, eps=eps,
-            coef_safe=coef_safe, coef_unsafe=coef_unsafe,
-            coef_h_dot=coef_h_dot, coef_action=coef_action,
+        goal_dist = torch.norm(states_flat[:, :2] - goals_flat[:, :2], dim=-1)  # (S*n,)
+
+        loss, info = compute_affine_loss(
+            pi_action=pi_agents,
+            u_at=u_at_flat,
+            u_qp=u_qp_flat,
+            goal_dist=goal_dist,
+            coef_goal=coef_goal,
+            coef_qp=coef_qp,
+            coef_reg=coef_reg,
         )
 
-        optim_cbf.zero_grad()
-        optim_actor.zero_grad()
+        optim.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(gcbf_net.parameters(), max_grad_norm)
         torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_grad_norm)
-        optim_cbf.step()
-        optim_actor.step()
+        optim.step()
 
         if step % log_interval == 0 or step == 1:
             elapsed = time.time() - t_start
-            # Payload swing angle statistics
+            # Scale statistics
             with torch.no_grad():
+                all_s = torch.stack(all_scale_states)[:, :, :, 0]  # (T, B, n)
+                mean_s = all_s.mean().item()
+                min_s = all_s.min().item()
+                max_s = all_s.max().item()
+                # Payload swing
                 all_ps = torch.stack(all_payload_states)  # (T, B, n, 4)
-                gamma_abs = torch.sqrt(all_ps[:, :, :, 0]**2 + all_ps[:, :, :, 1]**2)  # combined angle
+                gamma_abs = torch.sqrt(all_ps[:, :, :, 0]**2 + all_ps[:, :, :, 1]**2)
                 max_gamma = gamma_abs.max().item()
                 mean_gamma = gamma_abs.mean().item()
                 p95_gamma = torch.quantile(gamma_abs.float(), 0.95).item()
@@ -368,13 +315,10 @@ def train(
             print(
                 f"  step {step:5d}/{num_steps}"
                 f"  |  loss {info.get('loss/total', 0):.4f}"
-                f"  safe {info.get('loss/safe', 0):.4f}"
-                f"  unsafe {info.get('loss/unsafe', 0):.4f}"
-                f"  hdot {info.get('loss/h_dot', 0):.4f}"
-                f"  action {info.get('loss/action', 0):.4f}"
-                f"  |  acc_s {info.get('acc/safe', 0):.2f}"
-                f"  acc_u {info.get('acc/unsafe', 0):.2f}"
-                f"  acc_h {info.get('acc/h_dot', 0):.2f}"
+                f"  goal {info.get('loss/goal', 0):.4f}"
+                f"  qp {info.get('loss/qp', 0):.4f}"
+                f"  reg {info.get('loss/reg', 0):.4f}"
+                f"  |  s: mean={mean_s:.3f} [{min_s:.2f},{max_s:.2f}]"
                 f"  |  γ: mean={mean_gamma:.3f} p95={p95_gamma:.3f} max={max_gamma:.3f} viol={viol_rate:.1%}"
                 f"  |  {elapsed:.1f}s"
             )
@@ -384,11 +328,10 @@ def train(
                     history[k].append(info[k])
 
     print("=" * 60)
-    print(f"  Swarm training complete in {time.time() - t_start:.1f}s")
+    print(f"  Affine-transform swarm training complete in {time.time() - t_start:.1f}s")
     print("=" * 60)
 
     ckpt = {
-        "gcbf_net": gcbf_net.state_dict(),
         "policy_net": policy_net.state_dict(),
         "config": {
             "num_agents": num_agents,
@@ -398,12 +341,15 @@ def train(
             "action_dim": vec_env.action_dim,
             "state_dim": vec_env.state_dim,
             "comm_radius": vec_env.comm_radius,
-            "r_swarm": r_swarm,
-            "R_form": vec_env.params["R_form"],
+            "R_form": R_form,
+            "r_margin": r_margin,
+            "s_min": s_min,
+            "s_max": s_max,
             "n_obs": n_obs,
             "dt": vec_env.dt,
-            "cable_length": vec_env.params["cable_length"],
-            "gamma_max": vec_env.params["gamma_max"],
+            "cable_length": cable_length,
+            "gamma_max": gamma_max,
+            "architecture": "affine_transform",
         },
         "history": history,
     }
@@ -413,21 +359,20 @@ def train(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train GCBF+ Swarm (4D bounding circle)")
+    parser = argparse.ArgumentParser(description="Train Affine-Transform Swarm Policy")
     parser.add_argument("--num_agents", type=int, default=3)
     parser.add_argument("--area_size", type=float, default=15.0)
     parser.add_argument("--n_obs", type=int, default=6)
     parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--horizon", type=int, default=32)
-    parser.add_argument("--lr_cbf", type=float, default=1e-5)
-    parser.add_argument("--lr_actor", type=float, default=1e-5)
-    parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--eps", type=float, default=0.02)
-    parser.add_argument("--coef_action", type=float, default=0.5)
+    parser.add_argument("--lr_actor", type=float, default=1e-4)
+    parser.add_argument("--coef_goal", type=float, default=1.0)
+    parser.add_argument("--coef_qp", type=float, default=2.0)
+    parser.add_argument("--coef_reg", type=float, default=0.01)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--checkpoint", type=str, default="gcbf_swarm_checkpoint.pt")
+    parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
     a = vars(args)

@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Smoke tests for GCBF+ Swarm environment (3-drone rigid body per node).
+Smoke tests for Affine-Transform Swarm architecture.
+
+Tests:
+  1. SwarmIntegrator with scale state and 3D affine action
+  2. VectorizedSwarmEnv with batched scale dynamics
+  3. PolicyNetwork with action_dim=3
+  4. Affine QP solver constraints
+  5. Training loop (5 steps)
 
 Run with:
     python test_swarm.py
 """
 
-import math
 import sys
 import torch
+import numpy as np
 
 # ── Helpers ──────────────────────────────────────────────────────────────
-
 PASS = "\033[92m PASS \033[0m"
 FAIL = "\033[91m FAIL \033[0m"
 n_passed = 0
@@ -32,336 +38,286 @@ def check(name: str, condition: bool, detail: str = ""):
 # 1. SwarmIntegrator Environment Tests
 # ═══════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print(" 1. SwarmIntegrator Environment")
+print(" 1. SwarmIntegrator (Affine Transform)")
 print("=" * 60)
 
 from gcbf_plus.env import SwarmIntegrator
 
-NUM_AGENTS = 4
+NUM_AGENTS = 3
 env = SwarmIntegrator(num_agents=NUM_AGENTS, area_size=10.0, dt=0.03)
 
-# 1a. Basic properties
-check("state_dim == 6", env.state_dim == 6)
-check("action_dim == 3", env.action_dim == 3)
+# Properties
+check("state_dim == 4", env.state_dim == 4)
+check("action_dim == 3", env.action_dim == 3, f"got {env.action_dim}")
 check("node_dim == 3", env.node_dim == 3)
-check("edge_dim == 8", env.edge_dim == 8)
+check("edge_dim == 4", env.edge_dim == 4)
 
-# 1b. g_x_matrix shape
-g_x = env.g_x_matrix
-check(
-    f"g_x_matrix shape == (6, 3)",
-    g_x.shape == (6, 3),
-    f"got {g_x.shape}",
-)
+# Reset
+env.reset(seed=42)
+check(f"agent_states shape == ({NUM_AGENTS}, 4)",
+      env.agent_states.shape == (NUM_AGENTS, 4),
+      f"got {env.agent_states.shape}")
+check(f"scale_states shape == ({NUM_AGENTS}, 2)",
+      env.scale_states.shape == (NUM_AGENTS, 2),
+      f"got {env.scale_states.shape}")
+check("scale_states initialized to [1.0, 0.0]",
+      torch.allclose(env.scale_states, torch.tensor([[1.0, 0.0]] * NUM_AGENTS)),
+      f"got {env.scale_states}")
+check(f"payload_states shape == ({NUM_AGENTS}, 4)",
+      env.payload_states.shape == (NUM_AGENTS, 4))
 
-# 1c. Reset
-graph = env.reset(seed=42)
-check("reset returns GraphsTuple", graph is not None)
-check(
-    f"agent_states shape == ({NUM_AGENTS}, 6)",
-    env.agent_states.shape == (NUM_AGENTS, 6),
-    f"got {env.agent_states.shape}",
-)
-check(
-    f"goal_states shape == ({NUM_AGENTS}, 6)",
-    env.goal_states.shape == (NUM_AGENTS, 6),
-    f"got {env.goal_states.shape}",
-)
-
-# 1d. Graph structure
-n_obs = env.params["n_obs"]
-expected_nodes = NUM_AGENTS + NUM_AGENTS + n_obs
-check(
-    f"n_node == {expected_nodes}",
-    graph.n_node == expected_nodes,
-    f"got {graph.n_node}",
-)
-check(
-    f"nodes shape == ({expected_nodes}, 3)",
-    graph.nodes.shape == (expected_nodes, 3),
-    f"got {graph.nodes.shape}",
-)
-check("n_edge >= 0", graph.n_edge >= 0)
-if graph.n_edge > 0:
-    check(
-        f"edges dim == 8",
-        graph.edges.shape[1] == 8,
-        f"got {graph.edges.shape[1]}",
-    )
-
-# 1e. Step
+# Step with 3D action
 action = torch.zeros(NUM_AGENTS, 3)
-graph_next, info = env.step(action)
-check("step returns graph", graph_next is not None)
-check("info has 'done'", "done" in info)
-check("info has 'step'", "step" in info)
+_, info = env.step(action)
+check("step with 3D action works", True)
+check("step returns info dict", "done" in info)
 
-# 1f. Nominal controller
+# Nominal controller shape
 u_ref = env.nominal_controller()
-check(
-    f"u_ref shape == ({NUM_AGENTS}, 3)",
-    u_ref.shape == (NUM_AGENTS, 3),
-    f"got {u_ref.shape}",
-)
+check(f"nominal_controller shape == ({NUM_AGENTS}, 3)",
+      u_ref.shape == (NUM_AGENTS, 3),
+      f"got {u_ref.shape}")
+check("nominal a_s == 0", (u_ref[:, 2] == 0).all().item())
+
+# Scale dynamics
+env.reset(seed=42)
+action = torch.zeros(NUM_AGENTS, 3)
+action[:, 2] = 1.0  # positive scale acceleration
+env.step(action)
+check("scale increases with positive a_s",
+      (env.scale_states[:, 0] > 1.0).all().item(),
+      f"got s={env.scale_states[:, 0].tolist()}")
+check("s_dot > 0 after positive a_s",
+      (env.scale_states[:, 1] > 0).all().item())
+
+# Scale clamping
+env.reset(seed=42)
+action = torch.zeros(NUM_AGENTS, 3)
+action[:, 2] = -100.0  # extreme negative
+for _ in range(100):
+    env.step(action)
+check(f"scale clamped at s_min={env.params['s_min']}",
+      (env.scale_states[:, 0] >= env.params["s_min"]).all().item(),
+      f"got s={env.scale_states[:, 0].tolist()}")
+
+# Dynamic r_swarm
+s_test = torch.tensor([0.5, 1.0, 1.5])
+r = env.r_swarm(s_test)
+check("r_swarm(0.5) < r_swarm(1.0) < r_swarm(1.5)",
+      r[0] < r[1] < r[2], f"got {r.tolist()}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2. Swarm Geometry Tests
-# ═══════════════════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print(" 2. Swarm Geometry (Drone Positions)")
-print("=" * 60)
-
-env2 = SwarmIntegrator(num_agents=2, area_size=10.0, params={"n_obs": 0})
-env2.reset(seed=100)
-
-# 2a. Drone positions shape
-drone_pos = env2.get_drone_positions()
-check(
-    f"drone_positions shape == (2, 3, 2)",
-    drone_pos.shape == (2, 3, 2),
-    f"got {drone_pos.shape}",
-)
-
-# 2b. Rotation correctness: θ=0 → drones at known offsets
-R_form = env2.params["R_form"]
-test_state = torch.tensor(
-    [[5.0, 5.0, 0.0, 0.0, 0.0, 0.0]],  # CoM at (5,5), θ=0
-    dtype=torch.float32,
-)
-drone_pos_test = env2.get_drone_positions(test_state)
-expected_d1 = torch.tensor([5.0 + R_form, 5.0])
-expected_d2 = torch.tensor([5.0 - R_form / 2, 5.0 + R_form * math.sqrt(3) / 2])
-expected_d3 = torch.tensor([5.0 - R_form / 2, 5.0 - R_form * math.sqrt(3) / 2])
-
-check(
-    "drone 1 at θ=0 correct",
-    torch.allclose(drone_pos_test[0, 0], expected_d1, atol=1e-5),
-    f"got {drone_pos_test[0, 0].tolist()} expected {expected_d1.tolist()}",
-)
-check(
-    "drone 2 at θ=0 correct",
-    torch.allclose(drone_pos_test[0, 1], expected_d2, atol=1e-5),
-    f"got {drone_pos_test[0, 1].tolist()} expected {expected_d2.tolist()}",
-)
-check(
-    "drone 3 at θ=0 correct",
-    torch.allclose(drone_pos_test[0, 2], expected_d3, atol=1e-5),
-    f"got {drone_pos_test[0, 2].tolist()} expected {expected_d3.tolist()}",
-)
-
-# 2c. Rotation by π/2: d1 should rotate 90° CCW
-test_state_rot = torch.tensor(
-    [[5.0, 5.0, 0.0, 0.0, math.pi / 2, 0.0]],
-    dtype=torch.float32,
-)
-drone_pos_rot = env2.get_drone_positions(test_state_rot)
-expected_d1_rot = torch.tensor([5.0, 5.0 + R_form])  # rotated 90° CCW
-check(
-    "drone 1 at θ=π/2 correct",
-    torch.allclose(drone_pos_rot[0, 0], expected_d1_rot, atol=1e-5),
-    f"got {drone_pos_rot[0, 0].tolist()} expected {expected_d1_rot.tolist()}",
-)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 3. Safety Mask Tests
+# 2. VectorizedSwarmEnv Tests
 # ═══════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print(" 3. Safety Masks (Drone-to-Drone Collision)")
+print(" 2. VectorizedSwarmEnv (Batched Affine)")
 print("=" * 60)
 
-env3 = SwarmIntegrator(
-    num_agents=2, area_size=10.0,
-    params={"n_obs": 0, "drone_radius": 0.05, "R_form": 0.3},
-)
-env3.reset(seed=200)
+from gcbf_plus.env.vectorized_swarm import VectorizedSwarmEnv
 
-# 3a. Far apart → safe
-env3._agent_states = torch.tensor([
-    [2.0, 2.0, 0.0, 0.0, 0.0, 0.0],
-    [8.0, 8.0, 0.0, 0.0, 0.0, 0.0],
-], dtype=torch.float32)
-check("far apart → both safe", env3.safe_mask().all().item())
+B = 4
+vec_env = VectorizedSwarmEnv(num_agents=NUM_AGENTS, batch_size=B, area_size=10.0,
+                              params={"n_obs": 2})
+vec_env.reset(torch.device("cpu"))
 
-# 3b. Very close → unsafe (drone overlap)
-env3._agent_states = torch.tensor([
-    [5.0, 5.0, 0.0, 0.0, 0.0, 0.0],
-    [5.0 + 0.01, 5.0, 0.0, 0.0, 0.0, 0.0],  # CoMs nearly overlap
-], dtype=torch.float32)
-unsafe = env3.unsafe_mask()
-check("overlapping → both unsafe", unsafe.all().item())
+check(f"action_dim == 3", vec_env.action_dim == 3)
+check(f"_agent_states shape == ({B}, {NUM_AGENTS}, 4)",
+      vec_env._agent_states.shape == (B, NUM_AGENTS, 4),
+      f"got {vec_env._agent_states.shape}")
+check(f"_scale_states shape == ({B}, {NUM_AGENTS}, 2)",
+      vec_env._scale_states.shape == (B, NUM_AGENTS, 2),
+      f"got {vec_env._scale_states.shape}")
+check("scale init s=1.0",
+      (vec_env._scale_states[:, :, 0] == 1.0).all().item())
+
+# Batched step
+action = torch.zeros(B, NUM_AGENTS, 3)
+action[:, :, 2] = 0.5  # scale accel
+vec_env.step(action)
+check("batched step with 3D action works", True)
+check("batched scale increases",
+      (vec_env._scale_states[:, :, 0] > 1.0).all().item())
+
+# Nominal controller
+u_nom = vec_env.nominal_controller()
+check(f"nominal shape == ({B}, {NUM_AGENTS}, 3)",
+      u_nom.shape == (B, NUM_AGENTS, 3),
+      f"got {u_nom.shape}")
+
+# Unsafe mask with dynamic radii
+mask = vec_env.unsafe_mask()
+check(f"unsafe_mask shape == ({B}, {NUM_AGENTS})",
+      mask.shape == (B, NUM_AGENTS),
+      f"got {mask.shape}")
+
+# Graph builder
+graph = vec_env.build_batch_graph()
+check("graph building works", graph is not None)
+check(f"graph n_node == {B * (NUM_AGENTS * 2 + 2)}",
+      graph.n_node == B * (NUM_AGENTS * 2 + 2),
+      f"got {graph.n_node}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4. Differentiable Dynamics Tests
+# 3. PolicyNetwork Tests
 # ═══════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print(" 4. Differentiable Dynamics")
+print(" 3. PolicyNetwork (3D Affine Output)")
 print("=" * 60)
 
-env4 = SwarmIntegrator(num_agents=3, area_size=10.0, params={"n_obs": 0})
-env4.reset(seed=300)
+from gcbf_plus.nn import PolicyNetwork
 
-# 4a. forward_step output shape
-states = env4.agent_states.clone().requires_grad_(True)
-action = torch.randn(3, 3) * 0.1
-next_states = env4.forward_step(states, action)
-check(
-    f"forward_step output shape == (3, 6)",
-    next_states.shape == (3, 6),
-    f"got {next_states.shape}",
-)
+policy = PolicyNetwork(node_dim=3, edge_dim=4, action_dim=3, n_agents=NUM_AGENTS)
+check(f"policy.action_dim == 3", policy.action_dim == 3)
 
-# 4b. Autograd through forward_step
-loss_test = next_states.sum()
-grad = torch.autograd.grad(loss_test, states, retain_graph=True)[0]
-check(
-    "forward_step gradient exists",
-    grad is not None and grad.shape == (3, 6),
-    f"grad is None or wrong shape",
-)
-check("forward_step gradient is finite", torch.isfinite(grad).all().item())
+# Forward pass on single-instance graph
+env_test = SwarmIntegrator(num_agents=NUM_AGENTS, area_size=10.0,
+                           params={"n_obs": 2, "comm_radius": 100.0})
+env_test.reset(seed=100)
+graph_test = env_test._get_graph()
+u = policy(graph_test)
+check(f"policy output shape == ({NUM_AGENTS}, 3)",
+      u.shape == (NUM_AGENTS, 3),
+      f"got {u.shape}")
+check("policy output is finite", torch.isfinite(u).all().item())
 
-# 4c. state_dot output shape
-x_dot = env4.state_dot(states, action)
-check(
-    f"state_dot output shape == (3, 6)",
-    x_dot.shape == (3, 6),
-    f"got {x_dot.shape}",
-)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 5. GNN Forward Pass with Swarm Graph
-# ═══════════════════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print(" 5. GNN Models with Swarm Graph")
-print("=" * 60)
-
-from gcbf_plus.nn import GCBFNetwork, PolicyNetwork
-
-env5 = SwarmIntegrator(
-    num_agents=NUM_AGENTS, area_size=10.0,
-    params={"comm_radius": 100.0, "n_obs": 2},
-)
-graph5 = env5.reset(seed=500)
-check(f"swarm graph n_edge > 0", graph5.n_edge > 0, f"got {graph5.n_edge}")
-
-NODE_DIM = env5.node_dim   # 3
-EDGE_DIM = env5.edge_dim   # 8
-
-# 5a. GCBF Network forward
-gcbf = GCBFNetwork(node_dim=NODE_DIM, edge_dim=EDGE_DIM, n_agents=NUM_AGENTS)
-h = gcbf(graph5)
-check(
-    f"GCBF output shape == ({NUM_AGENTS}, 1)",
-    h.shape == (NUM_AGENTS, 1),
-    f"got {h.shape}",
-)
-check("GCBF output is finite", torch.isfinite(h).all().item())
-
-# 5b. Policy Network forward
-policy = PolicyNetwork(
-    node_dim=NODE_DIM, edge_dim=EDGE_DIM, action_dim=3, n_agents=NUM_AGENTS
-)
-u = policy(graph5)
-check(
-    f"Policy output shape == ({NUM_AGENTS}, 3)",
-    u.shape == (NUM_AGENTS, 3),
-    f"got {u.shape}",
-)
-check("Policy output is finite", torch.isfinite(u).all().item())
-
-# 5c. Gradient flow
-loss_h = h.sum()
-loss_h.backward()
+# Gradient flow
+loss = u.sum()
+loss.backward()
 grad_ok = all(
     p.grad is not None and torch.isfinite(p.grad).all()
-    for p in gcbf.parameters()
+    for p in policy.parameters()
     if p.requires_grad
 )
-check("GCBF backward() succeeds with finite grads", grad_ok)
-
-# 5d. ψ₁ input dim = node_dim*2 + edge_dim = 3*2 + 8 = 14
-psi1_in = gcbf.gnn_layers[0].msg_net.net[0].in_features
-expected_in = NODE_DIM * 2 + EDGE_DIM
-check(
-    f"ψ₁ input dim == {expected_in} (node_dim*2 + edge_dim)",
-    psi1_in == expected_in,
-    f"got {psi1_in}",
-)
+check("policy backward() succeeds with finite grads", grad_ok)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 6. Lie Derivative through Swarm Graph (autograd test)
+# 4. Affine QP Solver Tests
 # ═══════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print(" 6. Lie Derivative (autograd through swarm graph)")
+print(" 4. Affine QP Solver")
 print("=" * 60)
 
-env6 = SwarmIntegrator(
-    num_agents=3, area_size=10.0,
-    params={"comm_radius": 100.0, "n_obs": 0},
+from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
+
+N = 5
+u_at = torch.randn(N, 3)
+s_val = torch.ones(N)
+s_dot_val = torch.zeros(N)
+
+# a) Basic call (no obstacles)
+u_qp = solve_affine_qp(
+    u_at=u_at,
+    s=s_val, s_dot=s_dot_val,
+    s_min=0.4, s_max=1.5,
 )
-env6.reset(seed=600)
+check("QP returns correct shape", u_qp.shape == (N, 3), f"got {u_qp.shape}")
+check("QP output is finite", torch.isfinite(u_qp).all().item())
 
-states6 = env6.agent_states.clone().requires_grad_(True)
-graph6 = env6.build_graph_differentiable(states6)
-gcbf6 = GCBFNetwork(node_dim=3, edge_dim=8, n_agents=3)
-h6 = gcbf6.gnn_layers[0](graph6)
-
-# Extract agent outputs
-h_agents6 = h6[:3].squeeze(-1)  # (3,)
-
-# Compute dh/dx
-dh_dx = torch.autograd.grad(
-    outputs=h_agents6.sum(),
-    inputs=states6,
-    create_graph=True,
-    retain_graph=True,
-)[0]
-check(
-    f"dh/dx shape == (3, 6)",
-    dh_dx.shape == (3, 6),
-    f"got {dh_dx.shape}",
+# b) Scale lower bound: if s is at s_min and s_dot < 0, a_s should be ≥ 0-ish
+s_low = torch.full((N,), 0.4)  # at s_min
+s_dot_neg = torch.full((N,), -0.5)  # falling
+u_at_neg = torch.zeros(N, 3)
+u_at_neg[:, 2] = -5.0  # big negative a_s
+u_qp_low = solve_affine_qp(
+    u_at=u_at_neg, s=s_low, s_dot=s_dot_neg,
+    s_min=0.4, s_max=1.5,
 )
-check("dh/dx is finite", torch.isfinite(dh_dx).all().item())
+# With s=s_min and s_dot=-0.5: lower bound = -α·(-0.5) - α·(0.4-0.4) = α·0.5 = 1.0
+check("scale lower bound enforced: a_s ≥ lower_bound",
+      (u_qp_low[:, 2] >= 0.9).all().item(),
+      f"got a_s={u_qp_low[:, 2].tolist()}")
 
-# Compute h_dot = (dh/dx) · x_dot
-action6 = torch.randn(3, 3) * 0.01
-x_dot6 = env6.state_dot(states6, action6)
-h_dot6 = (dh_dx * x_dot6).sum(dim=-1)
-check(
-    f"h_dot shape == (3,)",
-    h_dot6.shape == (3,),
-    f"got {h_dot6.shape}",
+# c) Scale upper bound: if s is at s_max and s_dot > 0
+s_high = torch.full((N,), 1.5)  # at s_max
+s_dot_pos = torch.full((N,), 0.5)
+u_at_pos = torch.zeros(N, 3)
+u_at_pos[:, 2] = 5.0  # big positive a_s
+u_qp_high = solve_affine_qp(
+    u_at=u_at_pos, s=s_high, s_dot=s_dot_pos,
+    s_min=0.4, s_max=1.5,
 )
-check("h_dot is finite", torch.isfinite(h_dot6).all().item())
+check("scale upper bound enforced: a_s <= upper_bound",
+      (u_qp_high[:, 2] <= -0.9).all().item(),
+      f"got a_s={u_qp_high[:, 2].tolist()}")
+
+# d) With obstacle
+obs_c = torch.tensor([[[5.0, 5.0]]]).expand(N, 1, 2).clone()
+obs_hs = torch.tensor([[[0.3, 0.3]]]).expand(N, 1, 2).clone()
+pos = torch.tensor([[5.0 + 1.0, 5.0]]).expand(N, 2).clone()  # 1m from obstacle
+vel = torch.zeros(N, 2)
+
+u_qp_obs = solve_affine_qp(
+    u_at=torch.zeros(N, 3),
+    obs_centers=obs_c, obs_half_sizes=obs_hs,
+    agent_pos=pos, agent_vel=vel,
+    s=s_val, s_dot=s_dot_val,
+    R_form=0.5, r_margin=0.2,
+    s_min=0.4, s_max=1.5,
+)
+check("QP with obstacles returns finite", torch.isfinite(u_qp_obs).all().item())
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 7. Edge Feature Content Sanity
+# 5. Loss Function Tests
 # ═══════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print(" 7. Edge Feature Sanity")
+print(" 5. Affine Loss Function")
 print("=" * 60)
 
-env7 = SwarmIntegrator(
-    num_agents=2, area_size=10.0,
-    params={"comm_radius": 100.0, "n_obs": 0},
-)
-env7.reset(seed=700)
-graph7 = env7._get_graph()
+from gcbf_plus.algo.loss import compute_affine_loss
 
-if graph7.n_edge > 0:
-    check("edge features dim == 8", graph7.edges.shape[1] == 8)
-    # min_dist (column 5) should be positive
-    min_dists = graph7.edges[:, 5]
-    check("min_dist values are positive", (min_dists > 0).all().item())
-    check("edge features are finite", torch.isfinite(graph7.edges).all().item())
-else:
-    print("  [INFO] No edges — skipping edge feature sanity checks")
+pi = torch.randn(N, 3, requires_grad=True)
+u_at_l = torch.randn(N, 3)
+u_qp_l = u_at_l + torch.randn(N, 3) * 0.1
+goal_d = torch.rand(N) * 5.0
+
+loss, info = compute_affine_loss(
+    pi_action=pi, u_at=u_at_l, u_qp=u_qp_l, goal_dist=goal_d,
+)
+check("loss is scalar", loss.dim() == 0)
+check("loss is finite", torch.isfinite(loss).item())
+check("info has loss/total", "loss/total" in info)
+check("info has loss/goal", "loss/goal" in info)
+check("info has loss/qp", "loss/qp" in info)
+check("info has loss/reg", "loss/reg" in info)
+
+loss.backward()
+check("backprop through loss succeeds", pi.grad is not None)
+check("gradient is finite", torch.isfinite(pi.grad).all().item())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 6. Mini Training Loop (3 steps)
+# ═══════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print(" 6. Mini Training Loop (3 steps)")
+print("=" * 60)
+
+from gcbf_plus.train_swarm import train
+try:
+    history = train(
+        num_agents=2,
+        area_size=8.0,
+        n_obs=1,
+        num_steps=3,
+        batch_size=4,
+        horizon=4,
+        lr_actor=1e-3,
+        log_interval=1,
+        seed=0,
+        checkpoint_path="/tmp/test_affine_ckpt.pt",
+        device="cpu",
+    )
+    check("training loop completes", True)
+    check("history has loss/total", len(history.get("loss/total", [])) > 0)
+    losses = history.get("loss/total", [])
+    check("loss values are finite", all(np.isfinite(l) for l in losses),
+          f"got {losses}")
+except Exception as e:
+    check("training loop completes", False, str(e))
 
 
 # ═══════════════════════════════════════════════════════════════════════
