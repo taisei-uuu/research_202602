@@ -187,7 +187,8 @@ def run_simulation(
                     payload_states=ps,
                     cable_length=env.params["cable_length"],
                     gravity=env.params["gravity"],
-                    gamma_max=env.params["gamma_max"],
+                    gamma_min=env.params["gamma_min"],
+                    gamma_max_full=env.params["gamma_max_full"],
                     payload_damping=env.params["payload_damping"],
                     u_max=env.params.get("u_max"),
                 )

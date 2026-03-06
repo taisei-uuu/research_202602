@@ -53,10 +53,14 @@ class VectorizedSwarmEnv:
         "s_min": 0.4,
         "s_max": 1.5,
         "s_dot_max": 1.0,
+        # Scale spring (nominal controller pulls s toward s_max)
+        "k_spring": 0.5,
+        "c_spring_damp": 0.3,
         # Payload parameters
         "cable_length": 1.0,
         "gravity": 9.81,
-        "gamma_max": 0.75,
+        "gamma_min": 0.2,        # γ_max at s=s_min (strict)
+        "gamma_max_full": 0.75,  # γ_max at s=s_max (relaxed)
         "payload_damping": 0.03,
     }
 
@@ -291,17 +295,27 @@ class VectorizedSwarmEnv:
 
         self._step_count += 1
 
-    # ── Nominal controller (LQR for translation, zero scale) ─────────
+    # ── Nominal controller (LQR + spring-force scale expansion) ────────
     def nominal_controller(self) -> torch.Tensor:
-        """Returns (B, n, 3): [a_cx, a_cy, 0]."""
+        """Returns (B, n, 3): [a_cx, a_cy, a_s_nom].
+
+        Translation: LQR toward goal.
+        Scale: Spring force pulling s toward s_max with damping.
+            a_s_nom = k_spring * (s_max - s) - c_damp * s_dot
+        """
         err = self._agent_states - self._goal_states  # (B, n, 4)
         u_trans = -torch.einsum("...j,ij->...i", err, self._K)  # (B, n, 2)
         u_max = self.params.get("u_max")
         if u_max is not None:
             u_trans = torch.clamp(u_trans, -u_max, u_max)
-        # Append zero scale acceleration
-        B, n = u_trans.shape[:2]
-        u = torch.cat([u_trans, torch.zeros(B, n, 1, device=u_trans.device)], dim=-1)
+        # Scale: spring force toward s_max
+        k = self.params.get("k_spring", 0.5)
+        c = self.params.get("c_spring_damp", 0.3)
+        s_max_val = self.params["s_max"]
+        s = self._scale_states[:, :, 0]       # (B, n)
+        s_dot = self._scale_states[:, :, 1]   # (B, n)
+        a_s_nom = k * (s_max_val - s) - c * s_dot  # (B, n)
+        u = torch.cat([u_trans, a_s_nom.unsqueeze(-1)], dim=-1)
         return u
 
     # ── Unsafe mask (dynamic bounding circle) ─────────────────────────

@@ -70,10 +70,14 @@ class SwarmIntegrator:
         "s_min": 0.4,            # minimum scale (drone collision prevention)
         "s_max": 1.5,            # maximum scale (wire tension limit)
         "s_dot_max": 1.0,        # maximum scale rate
+        # Scale spring (nominal controller pulls s toward s_max)
+        "k_spring": 0.5,         # spring constant toward s_max
+        "c_spring_damp": 0.3,    # damping on s_dot
         # Payload parameters
         "cable_length": 1.0,     # l (m)
         "gravity": 9.81,         # g (m/s^2)
-        "gamma_max": 0.75,       # max swing angle (rad)
+        "gamma_min": 0.2,        # γ_max at s=s_min (strict swing limit)
+        "gamma_max_full": 0.75,  # γ_max at s=s_max (relaxed swing limit)
         "payload_damping": 0.03, # small damping for numerical stability (1/s)
     }
 
@@ -310,16 +314,27 @@ class SwarmIntegrator:
         self._step_count += 1
         return self.agent_states, {"done": self._step_count >= self.max_steps}
 
-    # ── Nominal controller (LQR for translation, zero scale accel) ───
+    # ── Nominal controller (LQR + spring-force scale expansion) ────────
     def nominal_controller(self) -> torch.Tensor:
-        """Returns (n, 3): [a_cx, a_cy, 0] — LQR for translation, no scale change."""
+        """Returns (n, 3): [a_cx, a_cy, a_s_nom].
+
+        Translation: LQR toward goal.
+        Scale: Spring force pulling s toward s_max with damping.
+            a_s_nom = k_spring * (s_max - s) - c_damp * s_dot
+        """
         err = self.agent_states - self.goal_states
         u_trans = -err @ self._K.T  # (n, 2)
         u_max = self.params.get("u_max")
         if u_max is not None:
             u_trans = torch.clamp(u_trans, -u_max, u_max)
-        # Append zero scale acceleration
-        u = torch.cat([u_trans, torch.zeros(self.num_agents, 1, device=u_trans.device)], dim=-1)
+        # Scale: spring force toward s_max
+        k = self.params.get("k_spring", 0.5)
+        c = self.params.get("c_spring_damp", 0.3)
+        s_max = self.params["s_max"]
+        s = self.scale_states[:, 0]       # (n,)
+        s_dot = self.scale_states[:, 1]   # (n,)
+        a_s_nom = k * (s_max - s) - c * s_dot  # (n,)
+        u = torch.cat([u_trans, a_s_nom.unsqueeze(-1)], dim=-1)
         return u
 
     # ── Unsafe mask (dynamic bounding circle) ─────────────────────────

@@ -50,11 +50,12 @@ def solve_affine_qp(
     alpha_scale: float = 2.0,
     # Obstacle CBF params
     alpha_obs: float = 1.0,
-    # HOCBF payload swing data
+    # HOCBF payload swing data (dynamic γ_max)
     payload_states: Optional[torch.Tensor] = None,
     cable_length: float = 1.0,
     gravity: float = 9.81,
-    gamma_max: float = 0.75,
+    gamma_min: float = 0.2,          # γ_max at s=s_min (strict)
+    gamma_max_full: float = 0.75,    # γ_max at s=s_max (relaxed)
     payload_damping: float = 0.03,
     hocbf_alpha1: float = 2.0,
     hocbf_alpha2: float = 2.0,
@@ -199,8 +200,13 @@ def solve_affine_qp(
         a1 = hocbf_alpha1
         a2 = hocbf_alpha2
 
-        # X-axis HOCBF
-        h1x = gamma_max**2 - gx**2
+        # ── Dynamic γ_max(s): linear interpolation ──
+        # s=s_min → γ_min (strict), s=s_max → γ_max_full (relaxed)
+        t_scale = ((s - s_min) / (s_max - s_min + 1e-8)).clamp(0.0, 1.0)
+        gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_scale  # (N,)
+
+        # X-axis HOCBF (using dynamic γ_max per agent)
+        h1x = gamma_dyn**2 - gx**2
         h1dx = -2 * gx * gx_dot
         h2x = h1dx + a1 * h1x
         Cx = 2 * gx * torch.cos(gx) / l
@@ -209,8 +215,8 @@ def solve_affine_qp(
               + a1 * (-2 * gx * gx_dot)
               - a2 * h2x)
 
-        # Y-axis HOCBF
-        h1y = gamma_max**2 - gy**2
+        # Y-axis HOCBF (using dynamic γ_max per agent)
+        h1y = gamma_dyn**2 - gy**2
         h1dy = -2 * gy * gy_dot
         h2y = h1dy + a1 * h1y
         Cy = 2 * gy * torch.cos(gy) / l
