@@ -349,14 +349,18 @@ def train(
                 mean_s = all_s_vals.mean().item()
                 min_s = all_s_vals.min().item()
                 max_s = all_s_vals.max().item()
-                # Payload swing
+                # Payload swing — dynamic violation check
                 gamma_abs = torch.sqrt(
                     all_payload[:, :, 0]**2 + all_payload[:, :, 1]**2
                 )
                 max_gamma = gamma_abs.max().item()
                 mean_gamma = gamma_abs.mean().item()
                 p95_gamma = torch.quantile(gamma_abs.float(), 0.95).item()
-                viol_rate = (gamma_abs > gamma_min).float().mean().item()  # conservative: count vs strictest limit
+                # Dynamic γ_max(s) per sample
+                t_sc = ((all_s_vals - s_min) / (s_max - s_min + 1e-8)).clamp(0.0, 1.0)
+                gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_sc  # (N_pool, n)
+                viol_rate = (gamma_abs > gamma_dyn).float().mean().item()
+                mean_gamma_limit = gamma_dyn.mean().item()
 
             n_updates = len(epoch_losses)
             print(
@@ -368,7 +372,7 @@ def train(
                 f"  |  updates={n_updates}"
                 f"  |  s: mean={mean_s:.3f} [{min_s:.2f},{max_s:.2f}]"
                 f"  |  γ: mean={mean_gamma:.3f} p95={p95_gamma:.3f}"
-                f"  max={max_gamma:.3f} viol={viol_rate:.1%}"
+                f"  max={max_gamma:.3f} lim={mean_gamma_limit:.3f} viol={viol_rate:.1%}"
                 f"  |  {elapsed:.1f}s"
             )
             history["step"].append(step)

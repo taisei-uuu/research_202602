@@ -59,7 +59,7 @@ def compute_triangle_vertices(com_x, com_y, theta, R_form):
 
 
 def load_trained_policy(checkpoint_path: str):
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     cfg = ckpt["config"]
     policy_net = PolicyNetwork(
         node_dim=cfg["node_dim"],

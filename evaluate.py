@@ -244,7 +244,7 @@ def evaluate_episode(
 
 def load_checkpoint(path: str):
     """Load trained policy and config from checkpoint."""
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     cfg = ckpt["config"]
 
     policy_net = PolicyNetwork(
