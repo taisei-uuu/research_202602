@@ -111,7 +111,7 @@ def run_simulation(
         dt = cfg["dt"]
         comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
-        is_swarm = cfg.get("architecture") == "affine_transform" or "R_form" in cfg
+        is_swarm = cfg.get("architecture") in ("affine_transform", "hierarchical_velocity_command") or "R_form" in cfg
         R_form = cfg.get("R_form", 0.5)
         r_margin = cfg.get("r_margin", 0.2)
         s_min = cfg.get("s_min", 0.4)
@@ -148,17 +148,39 @@ def run_simulation(
     obstacle_info = [(obs.center.numpy().copy(), obs.half_size.numpy().copy())
                      for obs in env._obstacles]
 
+    # Hierarchical velocity-command config
+    v_max_cfg = cfg.get("v_max", 1.0) if cfg else 1.0
+    s_dot_max_cfg = cfg.get("s_dot_max", 1.0) if cfg else 1.0
+    K_pos_cfg = cfg.get("K_pos", 0.5) if cfg else 0.5
+    K_v_cfg = cfg.get("K_v", 10.0) if cfg else 10.0
+    K_s_cfg = cfg.get("K_s", 5.0) if cfg else 5.0
+
     for _ in range(max_steps):
         if policy_net is not None:
             with torch.no_grad():
                 graph = env._get_graph()
-                u_ref = env.nominal_controller()  # (n, 3)
-                pi_raw = policy_net(graph)  # (n, 3)
-                u = u_ref + pi_raw
+                # Level 1: GNN → tanh → scale to physical velocity
+                pi_tanh = policy_net(graph)  # (n, 3) already tanh'd
+                pi_scaled = pi_tanh.clone()
+                pi_scaled[:, :2] *= v_max_cfg
+                pi_scaled[:, 2] *= s_dot_max_cfg
 
-                # Apply QP
+                # Level 1+2: velocity → PD → acceleration
                 pos = env.agent_states[:, :2]
-                vel = env.agent_states[:, 2:4]
+                goal_pos = env.goal_states[:, :2]
+                v_current = env.agent_states[:, 2:4]
+                s_dot_current = env.scale_states[:, 1]
+
+                v_ref = K_pos_cfg * (goal_pos - pos)
+                v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
+                v_target = v_ref + pi_scaled[:, :2]
+                s_dot_target = pi_scaled[:, 2]
+
+                a_trans = K_v_cfg * (v_target - v_current)
+                a_s = K_s_cfg * (s_dot_target - s_dot_current)
+                u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+
+                # Level 3: QP
                 sc = env.scale_states[:, 0]
                 sd = env.scale_states[:, 1]
                 ps = env.payload_states
@@ -172,11 +194,11 @@ def run_simulation(
                     ohs = None
 
                 u = solve_affine_qp(
-                    u_at=u,
+                    u_nom=u_nom,
                     obs_centers=oc,
                     obs_half_sizes=ohs,
                     agent_pos=pos,
-                    agent_vel=vel,
+                    agent_vel=v_current,
                     s=sc,
                     s_dot=sd,
                     R_form=R_form,

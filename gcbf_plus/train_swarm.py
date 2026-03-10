@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Affine-Transform Swarm Training Loop (Vectorized + Shuffled Mini-Batch).
+Hierarchical Velocity-Command Swarm Training Loop.
 
-Architecture:
-    GNN π(x) → affine offset [Δa_cx, Δa_cy, a_s]
-    u_AT = u_nom + π(x)
-    Analytical QP (Obs-CBF + Scale-CBF + HOCBF) → u_QP
-    env.step(u_QP)
+Architecture (4 Levels):
+    Level 1: GNN π(x) → tanh → velocity commands (Δv_x, Δv_y, ṡ_target)
+             v_target = K_pos*(goal-pos) + v_GNN_offset
+    Level 2: PD Controller → a_nom = K_v*(v_target - v_current)
+    Level 3: Analytical QP (HOCBF→Obs-CBF→Scale-CBF, Dykstra iteration)
+    Level 4: env.step(X*) → distribute to individual drones
 
 Data collection:
     Roll out `horizon` steps × `batch_size` envs → pool of N_total samples.
     Shuffle pool, draw `mini_batch_size` samples, train for `n_epochs` epochs.
 
 Loss:
-    L_goal:  Goal-reaching incentive
-    L_qp:   QP-intervention penalty
+    L_goal:  Goal‐reaching incentive
+    L_qp:   QP‐intervention penalty (||u_nom - X*||²)
     L_reg:  Action regularization
 
 Usage:
@@ -50,6 +51,48 @@ def extract_agent_outputs(
     return full_output[idx.reshape(-1)]
 
 
+def _velocity_to_accel(
+    pi_scaled: torch.Tensor,
+    agent_states: torch.Tensor,
+    goal_states: torch.Tensor,
+    scale_states: torch.Tensor,
+    K_pos: float,
+    K_v: float,
+    K_s: float,
+    v_max: float,
+) -> torch.Tensor:
+    """Level 1+2: GNN velocity commands → PD → nominal acceleration.
+
+    Parameters
+    ----------
+    pi_scaled : (..., 3) — (Δv_x, Δv_y, ṡ_target) already in physical units.
+    agent_states : (..., 4) — [px, py, vx, vy]
+    goal_states : (..., 4) — [gx, gy, gvx, gvy]
+    scale_states : (..., 2) — [s, s_dot]
+
+    Returns
+    -------
+    u_nom : (..., 3) — [a_cx_nom, a_cy_nom, a_s_nom]
+    """
+    # Level 1: target velocity
+    pos = agent_states[..., :2]
+    goal_pos = goal_states[..., :2]
+    v_current = agent_states[..., 2:4]
+
+    v_ref = K_pos * (goal_pos - pos)
+    v_ref = torch.clamp(v_ref, -v_max, v_max)
+    v_target = v_ref + pi_scaled[..., :2]
+
+    s_dot_target = pi_scaled[..., 2]
+    s_dot_current = scale_states[..., 1]
+
+    # Level 2: PD controller
+    a_trans = K_v * (v_target - v_current)
+    a_s = K_s * (s_dot_target - s_dot_current)
+
+    return torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+
+
 def train(
     num_agents: int = 3,
     area_size: float = 15.0,
@@ -69,7 +112,7 @@ def train(
     checkpoint_path: str = "affine_swarm_checkpoint.pt",
     device: str = "auto",
 ) -> Dict[str, list]:
-    """Train affine-transform swarm policy (vectorized + shuffled mini-batch)."""
+    """Train hierarchical velocity-command swarm policy."""
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -87,37 +130,40 @@ def train(
         params={"n_obs": n_obs},
     )
 
-    # ---- Network (GNN outputs 3D affine offset) ----
+    # ---- Network (GNN outputs 3D velocity commands) ----
     policy_net = PolicyNetwork(
         node_dim=vec_env.node_dim,    # 3
         edge_dim=vec_env.edge_dim,    # 4
-        action_dim=vec_env.action_dim,  # 3: [Δa_cx, Δa_cy, a_s]
+        action_dim=3,                 # (Δv_x, Δv_y, ṡ_target)
         n_agents=num_agents,
     ).to(dev)
 
     optim = torch.optim.Adam(policy_net.parameters(), lr=lr_actor)
 
     # ---- Constants ----
-    K_mat = vec_env._K.to(dev)  # (2, 4)
     mass = vec_env.params["mass"]
     u_max = vec_env.params.get("u_max")
+    v_max = vec_env.params.get("v_max", 1.0)
+    s_dot_max = vec_env.params.get("s_dot_max", 1.0)
     R_form = vec_env.params["R_form"]
     r_margin = vec_env.params["r_margin"]
     s_min = vec_env.params["s_min"]
     s_max = vec_env.params["s_max"]
     N_per = num_agents * 2 + n_obs
 
-    # Payload / HOCBF constants (dynamic gamma)
+    # Hierarchical velocity-command gains
+    K_pos = vec_env.params.get("K_pos", 0.5)
+    K_v = vec_env.params.get("K_v", 10.0)
+    K_s = vec_env.params.get("K_s", 5.0)
+
+    # Payload / HOCBF constants
     cable_length = vec_env.params["cable_length"]
     gravity = vec_env.params["gravity"]
     gamma_min = vec_env.params["gamma_min"]
     gamma_max_full = vec_env.params["gamma_max_full"]
     payload_damping = vec_env.params["payload_damping"]
-    # Spring force constants
-    k_spring = vec_env.params.get("k_spring", 0.5)
-    c_spring_damp = vec_env.params.get("c_spring_damp", 0.3)
 
-    # Pool size: horizon * batch_size (number of environment snapshots)
+    # Pool size
     N_pool = horizon * batch_size
 
     history: Dict[str, list] = {
@@ -126,12 +172,13 @@ def train(
     }
 
     print("=" * 60)
-    print(f"  Affine-Transform Swarm Training (Shuffled Mini-Batch)")
+    print(f"  Hierarchical Velocity-Command Swarm Training")
     print(f"  swarms={num_agents}  batch={batch_size}  horizon={horizon}"
           f"  area={area_size}")
     print(f"  pool_size={N_pool}  mini_batch={mini_batch_size}  epochs={n_epochs}")
-    print(f"  State=4D  Action=3D(affine)  Edge=4D  Nodes/sample={N_per}")
+    print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
+    print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
     print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}  coef_reg={coef_reg}")
     print("=" * 60)
     t_start = time.time()
@@ -142,17 +189,16 @@ def train(
         # PHASE 1: Vectorized data collection (no_grad)
         # ============================================================
         vec_env.reset(dev)
-        goal_fixed = vec_env._goal_states.clone()       # (B, n, 4)
-        obs_fixed = vec_env._obstacle_states.clone()     # (B, n_obs, 4)
+        goal_fixed = vec_env._goal_states.clone()
+        obs_fixed = vec_env._obstacle_states.clone()
         obs_centers = vec_env._obstacle_centers.clone() if vec_env._obstacle_centers is not None else None
         obs_half_sizes = vec_env._obstacle_half_sizes.clone() if vec_env._obstacle_half_sizes is not None else None
 
-        # Collect state snapshots
-        pool_agent = []     # each: (B, n, 4)
-        pool_scale = []     # each: (B, n, 2)
-        pool_payload = []   # each: (B, n, 4)
-        pool_goal = []      # each: (B, n, 4)
-        pool_obs = []       # each: (B, n_obs, 4)
+        pool_agent = []
+        pool_scale = []
+        pool_payload = []
+        pool_goal = []
+        pool_obs = []
 
         with torch.no_grad():
             for t in range(horizon):
@@ -162,18 +208,27 @@ def train(
                 pool_goal.append(goal_fixed.clone())
                 pool_obs.append(obs_fixed.clone())
 
-                # Policy forward + QP for rollout
+                # Level 1: GNN → tanh → scale to physical velocity
                 mega = vec_env.build_batch_graph()
-                pi_all = policy_net.gnn_layers[0](mega)
-                pi_agents = extract_agent_outputs(pi_all, num_agents, N_per, batch_size)
+                pi_raw = policy_net.gnn_layers[0](mega)  # no tanh yet (raw)
+                pi_tanh = torch.tanh(pi_raw)
+                pi_agents = extract_agent_outputs(pi_tanh, num_agents, N_per, batch_size)
                 pi_agents = pi_agents.reshape(batch_size, num_agents, 3)
 
-                u_ref = vec_env.nominal_controller()  # (B, n, 3)
-                u_at = u_ref + pi_agents
+                # Scale to physical units: (Δv_x, Δv_y) * v_max, ṡ * s_dot_max
+                pi_scaled = pi_agents.clone()
+                pi_scaled[:, :, :2] *= v_max
+                pi_scaled[:, :, 2] *= s_dot_max
 
-                # QP solve
+                # Level 1+2: velocity → PD → acceleration
+                u_nom = _velocity_to_accel(
+                    pi_scaled, vec_env._agent_states, goal_fixed,
+                    vec_env._scale_states, K_pos, K_v, K_s, v_max,
+                )
+
+                # Level 3: QP solve
                 BN = batch_size * num_agents
-                u_at_flat = u_at.reshape(BN, 3)
+                u_nom_flat = u_nom.reshape(BN, 3)
                 pos_flat = vec_env._agent_states[:, :, :2].reshape(BN, 2)
                 vel_flat = vec_env._agent_states[:, :, 2:4].reshape(BN, 2)
                 s_flat = vec_env._scale_states[:, :, 0].reshape(BN)
@@ -188,7 +243,7 @@ def train(
                     obs_hs_exp = None
 
                 u_qp_flat = solve_affine_qp(
-                    u_at=u_at_flat,
+                    u_nom=u_nom_flat,
                     obs_centers=obs_c_exp, obs_half_sizes=obs_hs_exp,
                     agent_pos=pos_flat, agent_vel=vel_flat,
                     s=s_flat, s_dot=s_dot_flat,
@@ -201,28 +256,26 @@ def train(
                     u_max=u_max,
                 )
                 u_qp = u_qp_flat.reshape(batch_size, num_agents, 3)
+
+                # Level 4: env.step distributes to drones
                 vec_env.step(u_qp)
 
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
         # ============================================================
-        # Stack: (horizon, B, n, dim) → (horizon*B, n, dim)
         all_agent = torch.stack(pool_agent).reshape(N_pool, num_agents, 4)
         all_scale = torch.stack(pool_scale).reshape(N_pool, num_agents, 2)
         all_payload = torch.stack(pool_payload).reshape(N_pool, num_agents, 4)
         all_goal = torch.stack(pool_goal).reshape(N_pool, num_agents, 4)
         all_obs_st = torch.stack(pool_obs).reshape(N_pool, n_obs, 4)
 
-        # Also prepare obstacle geometry for QP (stays same within one rollout)
         if obs_centers is not None:
-            # (B, n_obs, 2) → expand to (horizon, B, n_obs, 2) → (N_pool, n_obs, 2)
             all_obs_c = obs_centers.unsqueeze(0).expand(horizon, -1, -1, -1).reshape(N_pool, n_obs, 2)
             all_obs_hs = obs_half_sizes.unsqueeze(0).expand(horizon, -1, -1, -1).reshape(N_pool, n_obs, 2)
         else:
             all_obs_c = None
             all_obs_hs = None
 
-        # Shuffle indices
         perm = torch.randperm(N_pool, device=dev)
 
         # ============================================================
@@ -231,7 +284,6 @@ def train(
         epoch_losses = []
 
         for epoch in range(n_epochs):
-            # Re-shuffle each epoch
             if epoch > 0:
                 perm = torch.randperm(N_pool, device=dev)
 
@@ -241,13 +293,13 @@ def train(
                 idx = perm[bi * mini_batch_size : (bi + 1) * mini_batch_size]
                 mb_size = idx.shape[0]
 
-                mb_agent = all_agent[idx]      # (mb, n, 4)
-                mb_scale = all_scale[idx]      # (mb, n, 2)
-                mb_payload = all_payload[idx]  # (mb, n, 4)
-                mb_goal = all_goal[idx]        # (mb, n, 4)
-                mb_obs_st = all_obs_st[idx]    # (mb, n_obs, 4)
+                mb_agent = all_agent[idx]
+                mb_scale = all_scale[idx]
+                mb_payload = all_payload[idx]
+                mb_goal = all_goal[idx]
+                mb_obs_st = all_obs_st[idx]
 
-                # ── Build graph for this mini-batch ──
+                # ── Build graph ──
                 mega = build_vectorized_swarm_graph(
                     agent_states=mb_agent,
                     goal_states=mb_goal,
@@ -257,37 +309,34 @@ def train(
                     edge_dim=vec_env.edge_dim,
                 )
 
-                # ── GNN forward ──
-                pi_all = policy_net.gnn_layers[0](mega)
-                pi_agents = extract_agent_outputs(pi_all, num_agents, N_per, mb_size)
-                pi_agents = pi_agents.reshape(mb_size * num_agents, 3)
+                # ── Level 1: GNN → tanh → scale ──
+                pi_raw = policy_net.gnn_layers[0](mega)
+                pi_tanh = torch.tanh(pi_raw)
+                pi_agents = extract_agent_outputs(pi_tanh, num_agents, N_per, mb_size)
+                pi_agents = pi_agents.reshape(mb_size, num_agents, 3)
 
-                # ── Nominal control (LQR + spring force) ──
-                states_flat = mb_agent.reshape(-1, 4)   # (mb*n, 4)
-                goals_flat = mb_goal.reshape(-1, 4)
-                err = states_flat - goals_flat
-                u_ref_flat = -torch.einsum("...j,ij->...i", err, K_mat)  # (mb*n, 2)
-                if u_max is not None:
-                    u_ref_flat = torch.clamp(u_ref_flat, -u_max, u_max)
-                # Spring-force scale component: a_s_nom = k*(s_max-s) - c*s_dot
-                mb_s = mb_scale.reshape(-1, 2)[:, 0]       # (mb*n,)
-                mb_sd = mb_scale.reshape(-1, 2)[:, 1]      # (mb*n,)
-                a_s_nom = k_spring * (s_max - mb_s) - c_spring_damp * mb_sd
-                u_ref_3d = torch.cat([u_ref_flat, a_s_nom.unsqueeze(-1)], dim=-1)
+                pi_scaled = pi_agents.clone()
+                pi_scaled[:, :, :2] = pi_scaled[:, :, :2] * v_max
+                pi_scaled[:, :, 2] = pi_scaled[:, :, 2] * s_dot_max
 
-                u_at_flat = u_ref_3d + pi_agents  # (mb*n, 3)
+                # ── Level 1+2: velocity → PD → acceleration ──
+                u_nom = _velocity_to_accel(
+                    pi_scaled, mb_agent, mb_goal,
+                    mb_scale, K_pos, K_v, K_s, v_max,
+                )
+                u_nom_flat = u_nom.reshape(mb_size * num_agents, 3)
 
-                # ── QP solve (no grad) ──
+                # ── Level 3: QP solve (no grad) ──
                 with torch.no_grad():
-                    pos_f = states_flat[:, :2]
-                    vel_f = states_flat[:, 2:4]
+                    states_flat = mb_agent.reshape(-1, 4)
+                    goals_flat = mb_goal.reshape(-1, 4)
                     s_f = mb_scale.reshape(-1, 2)[:, 0]
                     sd_f = mb_scale.reshape(-1, 2)[:, 1]
                     ps_f = mb_payload.reshape(-1, 4)
 
                     if all_obs_c is not None:
-                        mb_obs_c = all_obs_c[idx]    # (mb, n_obs, 2)
-                        mb_obs_hs = all_obs_hs[idx]  # (mb, n_obs, 2)
+                        mb_obs_c = all_obs_c[idx]
+                        mb_obs_hs = all_obs_hs[idx]
                         obs_c_exp = mb_obs_c.unsqueeze(1).expand(-1, num_agents, -1, -1) \
                                            .reshape(mb_size * num_agents, n_obs, 2)
                         obs_hs_exp = mb_obs_hs.unsqueeze(1).expand(-1, num_agents, -1, -1) \
@@ -297,9 +346,9 @@ def train(
                         obs_hs_exp = None
 
                     u_qp_flat = solve_affine_qp(
-                        u_at=u_at_flat.detach(),
+                        u_nom=u_nom_flat.detach(),
                         obs_centers=obs_c_exp, obs_half_sizes=obs_hs_exp,
-                        agent_pos=pos_f, agent_vel=vel_f,
+                        agent_pos=states_flat[:, :2], agent_vel=states_flat[:, 2:4],
                         s=s_f, s_dot=sd_f,
                         R_form=R_form, r_margin=r_margin, mass=mass,
                         s_min=s_min, s_max=s_max,
@@ -314,16 +363,21 @@ def train(
                 goal_dist = torch.norm(
                     states_flat[:, :2] - goals_flat[:, :2], dim=-1
                 )
+                # QP intervention tracking
+                qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
 
                 loss, info = compute_affine_loss(
-                    pi_action=pi_agents,
-                    u_at=u_at_flat,
+                    pi_action=pi_agents.reshape(-1, 3),
+                    u_at=u_nom_flat,
                     u_qp=u_qp_flat,
                     goal_dist=goal_dist,
                     coef_goal=coef_goal,
                     coef_qp=coef_qp,
                     coef_reg=coef_reg,
                 )
+                # Add mean/max QP intervention to info
+                info["qp_cut/mean"] = qp_intervention.mean().item()
+                info["qp_cut/max"] = qp_intervention.max().item()
 
                 optim.zero_grad()
                 loss.backward()
@@ -338,14 +392,12 @@ def train(
         if step % log_interval == 0 or step == 1:
             elapsed = time.time() - t_start
 
-            # Average info over all mini-batches
             avg_info = {}
             for k in epoch_losses[0]:
                 avg_info[k] = np.mean([d[k] for d in epoch_losses])
 
-            # Scale statistics (from collected pool)
             with torch.no_grad():
-                all_s_vals = all_scale[:, :, 0]  # (N_pool, n)
+                all_s_vals = all_scale[:, :, 0]
                 mean_s = all_s_vals.mean().item()
                 min_s = all_s_vals.min().item()
                 max_s = all_s_vals.max().item()
@@ -356,23 +408,25 @@ def train(
                 max_gamma = gamma_abs.max().item()
                 mean_gamma = gamma_abs.mean().item()
                 p95_gamma = torch.quantile(gamma_abs.float(), 0.95).item()
-                # Dynamic γ_max(s) per sample
                 t_sc = ((all_s_vals - s_min) / (s_max - s_min + 1e-8)).clamp(0.0, 1.0)
-                gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_sc  # (N_pool, n)
+                gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_sc
                 viol_rate = (gamma_abs > gamma_dyn).float().mean().item()
                 mean_gamma_limit = gamma_dyn.mean().item()
 
             n_updates = len(epoch_losses)
+            qp_cut_mean = avg_info.get("qp_cut/mean", 0)
+            qp_cut_max = avg_info.get("qp_cut/max", 0)
             print(
                 f"  step {step:5d}/{num_steps}"
                 f"  |  loss {avg_info.get('loss/total', 0):.4f}"
                 f"  goal {avg_info.get('loss/goal', 0):.4f}"
                 f"  qp {avg_info.get('loss/qp', 0):.4f}"
                 f"  reg {avg_info.get('loss/reg', 0):.4f}"
-                f"  |  updates={n_updates}"
-                f"  |  s: mean={mean_s:.3f} [{min_s:.2f},{max_s:.2f}]"
-                f"  |  γ: mean={mean_gamma:.3f} p95={p95_gamma:.3f}"
+                f"  |  upd={n_updates}"
+                f"  |  s: {mean_s:.2f} [{min_s:.2f},{max_s:.2f}]"
+                f"  |  γ: {mean_gamma:.3f} p95={p95_gamma:.3f}"
                 f"  max={max_gamma:.3f} lim={mean_gamma_limit:.3f} viol={viol_rate:.1%}"
+                f"  |  cut: {qp_cut_mean:.3f}/{qp_cut_max:.3f}"
                 f"  |  {elapsed:.1f}s"
             )
             history["step"].append(step)
@@ -391,7 +445,7 @@ def train(
             "area_size": area_size,
             "node_dim": vec_env.node_dim,
             "edge_dim": vec_env.edge_dim,
-            "action_dim": vec_env.action_dim,
+            "action_dim": 3,
             "state_dim": vec_env.state_dim,
             "comm_radius": vec_env.comm_radius,
             "R_form": R_form,
@@ -403,7 +457,12 @@ def train(
             "cable_length": cable_length,
             "gamma_min": gamma_min,
             "gamma_max_full": gamma_max_full,
-            "architecture": "affine_transform",
+            "K_pos": K_pos,
+            "K_v": K_v,
+            "K_s": K_s,
+            "v_max": v_max,
+            "s_dot_max": s_dot_max,
+            "architecture": "hierarchical_velocity_command",
         },
         "history": history,
     }
@@ -413,7 +472,7 @@ def train(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Affine-Transform Swarm Policy")
+    parser = argparse.ArgumentParser(description="Train Hierarchical Velocity-Command Swarm Policy")
     parser.add_argument("--num_agents", type=int, default=3)
     parser.add_argument("--area_size", type=float, default=15.0)
     parser.add_argument("--n_obs", type=int, default=6)

@@ -53,9 +53,10 @@ class VectorizedSwarmEnv:
         "s_min": 0.4,
         "s_max": 1.5,
         "s_dot_max": 1.0,
-        # Scale spring (nominal controller pulls s toward s_max)
-        "k_spring": 0.5,
-        "c_spring_damp": 0.3,
+        # Hierarchical velocity-command gains
+        "K_pos": 0.5,          # proportional gain: goal_err → target velocity
+        "K_v": 10.0,           # PD gain: velocity error → acceleration (translation)
+        "K_s": 5.0,            # PD gain: velocity error → acceleration (scale)
         # Payload parameters
         "cable_length": 1.0,
         "gravity": 9.81,
@@ -295,28 +296,52 @@ class VectorizedSwarmEnv:
 
         self._step_count += 1
 
-    # ── Nominal controller (LQR + spring-force scale expansion) ────────
-    def nominal_controller(self) -> torch.Tensor:
-        """Returns (B, n, 3): [a_cx, a_cy, a_s_nom].
+    # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
+    def nominal_controller(self, v_target=None, s_dot_target=None):
+        """Returns (B, n, 3): [a_cx_nom, a_cy_nom, a_s_nom].
 
-        Translation: LQR toward goal.
-        Scale: Spring force pulling s toward s_max with damping.
-            a_s_nom = k_spring * (s_max - s) - c_damp * s_dot
+        Level 1: Compute target velocities.
+            v_ref = K_pos * (goal_pos - pos)   (proportional goal tracking)
+            v_target = v_ref + v_gnn_offset     (if provided externally)
+            s_dot_target = s_dot_gnn            (if provided externally)
+
+        Level 2: PD controller (velocity → acceleration).
+            a_trans_nom = K_v * (v_target - v_current)
+            a_s_nom     = K_s * (s_dot_target - s_dot_current)
+
+        Parameters
+        ----------
+        v_target : (B, n, 2) or None
+            Target translation velocity. If None, uses LQR-like v_ref.
+        s_dot_target : (B, n) or None
+            Target scale velocity. If None, uses 0.
         """
-        err = self._agent_states - self._goal_states  # (B, n, 4)
-        u_trans = -torch.einsum("...j,ij->...i", err, self._K)  # (B, n, 2)
-        u_max = self.params.get("u_max")
-        if u_max is not None:
-            u_trans = torch.clamp(u_trans, -u_max, u_max)
-        # Scale: spring force toward s_max
-        k = self.params.get("k_spring", 0.5)
-        c = self.params.get("c_spring_damp", 0.3)
-        s_max_val = self.params["s_max"]
-        s = self._scale_states[:, :, 0]       # (B, n)
-        s_dot = self._scale_states[:, :, 1]   # (B, n)
-        a_s_nom = k * (s_max_val - s) - c * s_dot  # (B, n)
-        u = torch.cat([u_trans, a_s_nom.unsqueeze(-1)], dim=-1)
-        return u
+        K_pos = self.params.get("K_pos", 0.5)
+        K_v = self.params.get("K_v", 10.0)
+        K_s = self.params.get("K_s", 5.0)
+        v_max = self.params.get("v_max", 1.0)
+
+        # Level 1: target velocity from proportional goal tracking
+        if v_target is None:
+            pos = self._agent_states[:, :, :2]      # (B, n, 2)
+            goal_pos = self._goal_states[:, :, :2]   # (B, n, 2)
+            v_ref = K_pos * (goal_pos - pos)          # (B, n, 2)
+            # Clamp to physical velocity limits
+            v_ref = torch.clamp(v_ref, -v_max, v_max)
+            v_target = v_ref
+
+        if s_dot_target is None:
+            s_dot_target = torch.zeros_like(self._scale_states[:, :, 0])
+
+        # Level 2: PD controller
+        v_current = self._agent_states[:, :, 2:4]   # (B, n, 2)
+        s_dot_current = self._scale_states[:, :, 1]  # (B, n)
+
+        a_trans_nom = K_v * (v_target - v_current)    # (B, n, 2)
+        a_s_nom = K_s * (s_dot_target - s_dot_current)  # (B, n)
+
+        u = torch.cat([a_trans_nom, a_s_nom.unsqueeze(-1)], dim=-1)
+        return u  # (B, n, 3)
 
     # ── Unsafe mask (dynamic bounding circle) ─────────────────────────
     def unsafe_mask(self) -> torch.Tensor:

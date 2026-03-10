@@ -70,9 +70,10 @@ class SwarmIntegrator:
         "s_min": 0.4,            # minimum scale (drone collision prevention)
         "s_max": 1.5,            # maximum scale (wire tension limit)
         "s_dot_max": 1.0,        # maximum scale rate
-        # Scale spring (nominal controller pulls s toward s_max)
-        "k_spring": 0.5,         # spring constant toward s_max
-        "c_spring_damp": 0.3,    # damping on s_dot
+        # Hierarchical velocity-command gains
+        "K_pos": 0.5,            # proportional gain: goal_err → target velocity
+        "K_v": 10.0,             # PD gain: velocity error → acceleration (translation)
+        "K_s": 5.0,              # PD gain: velocity error → acceleration (scale)
         # Payload parameters
         "cable_length": 1.0,     # l (m)
         "gravity": 9.81,         # g (m/s^2)
@@ -314,27 +315,35 @@ class SwarmIntegrator:
         self._step_count += 1
         return self.agent_states, {"done": self._step_count >= self.max_steps}
 
-    # ── Nominal controller (LQR + spring-force scale expansion) ────────
-    def nominal_controller(self) -> torch.Tensor:
-        """Returns (n, 3): [a_cx, a_cy, a_s_nom].
+    # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
+    def nominal_controller(self, v_target=None, s_dot_target=None):
+        """Returns (n, 3): [a_cx_nom, a_cy_nom, a_s_nom].
 
-        Translation: LQR toward goal.
-        Scale: Spring force pulling s toward s_max with damping.
-            a_s_nom = k_spring * (s_max - s) - c_damp * s_dot
+        Level 1: v_ref = K_pos * (goal_pos - pos)
+        Level 2: a_nom = K_v * (v_target - v_current)
         """
-        err = self.agent_states - self.goal_states
-        u_trans = -err @ self._K.T  # (n, 2)
-        u_max = self.params.get("u_max")
-        if u_max is not None:
-            u_trans = torch.clamp(u_trans, -u_max, u_max)
-        # Scale: spring force toward s_max
-        k = self.params.get("k_spring", 0.5)
-        c = self.params.get("c_spring_damp", 0.3)
-        s_max = self.params["s_max"]
-        s = self.scale_states[:, 0]       # (n,)
-        s_dot = self.scale_states[:, 1]   # (n,)
-        a_s_nom = k * (s_max - s) - c * s_dot  # (n,)
-        u = torch.cat([u_trans, a_s_nom.unsqueeze(-1)], dim=-1)
+        K_pos = self.params.get("K_pos", 0.5)
+        K_v = self.params.get("K_v", 10.0)
+        K_s = self.params.get("K_s", 5.0)
+        v_max = self.params.get("v_max", 1.0)
+
+        if v_target is None:
+            pos = self.agent_states[:, :2]
+            goal_pos = self.goal_states[:, :2]
+            v_ref = K_pos * (goal_pos - pos)
+            v_ref = torch.clamp(v_ref, -v_max, v_max)
+            v_target = v_ref
+
+        if s_dot_target is None:
+            s_dot_target = torch.zeros_like(self.scale_states[:, 0])
+
+        v_current = self.agent_states[:, 2:4]
+        s_dot_current = self.scale_states[:, 1]
+
+        a_trans_nom = K_v * (v_target - v_current)
+        a_s_nom = K_s * (s_dot_target - s_dot_current)
+
+        u = torch.cat([a_trans_nom, a_s_nom.unsqueeze(-1)], dim=-1)
         return u
 
     # ── Unsafe mask (dynamic bounding circle) ─────────────────────────

@@ -1,11 +1,14 @@
 """
-Policy Network  π(x)  —  outputs a control action per agent.
+Policy Network  π(x)  —  outputs bounded velocity commands per agent.
 
 Architecture (Table I):
     Encoder ψ₁ : [node_dim*2 + edge_dim → 256 → 256 → 128]
     Attention ψ₂: [128 → 128 → 128 → 1]
     Value ψ₃   : [128 → 256 → 128]
     Decoder ψ₄ : [128 → 256 → 256 → action_dim]
+
+Output is passed through tanh → values in [-1, 1].
+Caller scales by (v_max, v_max, s_dot_max) to get physical velocity commands.
 """
 
 from __future__ import annotations
@@ -19,9 +22,10 @@ from ..utils.graph import GraphsTuple
 
 class PolicyNetwork(nn.Module):
     """
-    Distributed policy network.
+    Distributed policy network (velocity-command mode).
 
-    Takes a ``GraphsTuple`` and returns a control action u_i for every agent.
+    Takes a ``GraphsTuple`` and returns bounded velocity commands for every
+    agent:  (Δv_x, Δv_y, ṡ_target) ∈ [-1, 1]³  (pre-scaling).
 
     Parameters
     ----------
@@ -30,7 +34,7 @@ class PolicyNetwork(nn.Module):
     edge_dim : int
         Dimension of raw edge features (default 4).
     action_dim : int
-        Dimension of the control output (default 2 for Double Integrator).
+        Dimension of the control output (3 for velocity commands).
     n_agents : int
         Number of agents.
     n_layers : int
@@ -43,7 +47,7 @@ class PolicyNetwork(nn.Module):
         self,
         node_dim: int = 3,
         edge_dim: int = 4,
-        action_dim: int = 2,
+        action_dim: int = 3,
         n_agents: int = 4,
         n_layers: int = 1,
     ):
@@ -75,10 +79,11 @@ class PolicyNetwork(nn.Module):
 
         Returns
         -------
-        u : (n_agents, action_dim) — control action per agent.
+        u : (n_agents, action_dim) — bounded velocity commands in [-1, 1].
         """
         out = self.gnn_layers[0](graph)  # (N, action_dim)
 
         # Extract only agent nodes
         u = out[: self.n_agents]  # (n_agents, action_dim)
-        return u
+        return torch.tanh(u)
+

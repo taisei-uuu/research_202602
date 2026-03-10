@@ -57,7 +57,7 @@ class MethodController(ABC):
 
 @register_method
 class AffinePolicy(MethodController):
-    """Trained affine-transform policy with analytical QP."""
+    """Trained hierarchical velocity-command policy with analytical QP."""
     name = "affine_policy"
 
     def __init__(self, policy_net, cfg):
@@ -67,13 +67,36 @@ class AffinePolicy(MethodController):
     def select_action(self, env):
         with torch.no_grad():
             graph = env._get_graph()
-            u_ref = env.nominal_controller()
-            pi_raw = self.policy_net(graph)
-            u_at = u_ref + pi_raw
+            cfg = self.cfg
 
-            # QP filter
+            # Level 1: GNN → tanh → scale
+            pi_tanh = self.policy_net(graph)  # (n, 3) already tanh'd
+            v_max_cfg = cfg.get("v_max", 1.0)
+            s_dot_max_cfg = cfg.get("s_dot_max", 1.0)
+            K_pos = cfg.get("K_pos", 0.5)
+            K_v = cfg.get("K_v", 10.0)
+            K_s = cfg.get("K_s", 5.0)
+
+            pi_scaled = pi_tanh.clone()
+            pi_scaled[:, :2] *= v_max_cfg
+            pi_scaled[:, 2] *= s_dot_max_cfg
+
+            # Level 1+2: velocity → PD → acceleration
             pos = env.agent_states[:, :2]
-            vel = env.agent_states[:, 2:4]
+            goal_pos = env.goal_states[:, :2]
+            v_current = env.agent_states[:, 2:4]
+            s_dot_current = env.scale_states[:, 1]
+
+            v_ref = K_pos * (goal_pos - pos)
+            v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
+            v_target = v_ref + pi_scaled[:, :2]
+            s_dot_target = pi_scaled[:, 2]
+
+            a_trans = K_v * (v_target - v_current)
+            a_s = K_s * (s_dot_target - s_dot_current)
+            u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+
+            # Level 3: QP
             sc = env.scale_states[:, 0]
             sd = env.scale_states[:, 1]
             ps = env.payload_states
@@ -88,9 +111,9 @@ class AffinePolicy(MethodController):
                 ohs = None
 
             u_qp = solve_affine_qp(
-                u_at=u_at,
+                u_nom=u_nom,
                 obs_centers=oc, obs_half_sizes=ohs,
-                agent_pos=pos, agent_vel=vel,
+                agent_pos=pos, agent_vel=v_current,
                 s=sc, s_dot=sd,
                 R_form=env.params["R_form"],
                 r_margin=env.params["r_margin"],
@@ -109,13 +132,14 @@ class AffinePolicy(MethodController):
 
 @register_method
 class HOCBFWithLQR(MethodController):
-    """LQR + HOCBF filter (no learned policy)."""
+    """LQR velocity tracking + HOCBF filter (no learned policy)."""
     name = "hocbf_lqr"
 
     def __init__(self, cfg=None):
         self.cfg = cfg or {}
 
     def select_action(self, env):
+        # Use nominal controller (proportional goal tracking + PD)
         u_ref = env.nominal_controller()
         with torch.no_grad():
             pos = env.agent_states[:, :2]
@@ -134,7 +158,7 @@ class HOCBFWithLQR(MethodController):
                 ohs = None
 
             u_qp = solve_affine_qp(
-                u_at=u_ref,
+                u_nom=u_ref,
                 obs_centers=oc, obs_half_sizes=ohs,
                 agent_pos=pos, agent_vel=vel,
                 s=sc, s_dot=sd,
