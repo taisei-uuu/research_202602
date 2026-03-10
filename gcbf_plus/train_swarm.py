@@ -98,12 +98,13 @@ def _velocity_to_accel(
 
     u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
-    # Pre-clamp: keep u_nom within physically feasible range
+    # Pre-clamp: keep u_nom within physically feasible range (out-of-place for autograd)
     if u_max is not None:
         a_max_trans = n_drones * u_max / mass * 0.7   # 70% margin for translation
         a_max_scale = n_drones * u_max / mass * 0.3   # 30% margin for scale
-        u_nom[..., :2] = u_nom[..., :2].clamp(-a_max_trans, a_max_trans)
-        u_nom[..., 2]  = u_nom[..., 2].clamp(-a_max_scale, a_max_scale)
+        clamped_trans = u_nom[..., :2].clamp(-a_max_trans, a_max_trans)
+        clamped_scale = u_nom[..., 2:].clamp(-a_max_scale, a_max_scale)
+        u_nom = torch.cat([clamped_trans, clamped_scale], dim=-1)
 
     return u_nom
 
