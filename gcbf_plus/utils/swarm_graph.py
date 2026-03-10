@@ -4,14 +4,14 @@ Simplified swarm graph building — Bounding Circle approach.
 Each swarm is treated as a point mass with a bounding circle of radius
 r_swarm.  No rotation, no 9-point drone distances.
 
-Edge creation:  CoM distance < R_sensing
+Edge creation:  CoM distance < R_sensing(s) = comm_base * s
 Edge features (4D):  [Δpx, Δpy, Δvx, Δvy]
 """
 
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -31,7 +31,7 @@ def build_swarm_graph_from_states(
     agent_states: torch.Tensor,
     goal_states: torch.Tensor,
     obstacle_positions: Optional[torch.Tensor],
-    comm_radius: float,
+    comm_radius: Union[float, torch.Tensor],
     node_dim: int = 3,
     edge_dim: int = 4,
 ) -> GraphsTuple:
@@ -43,7 +43,8 @@ def build_swarm_graph_from_states(
     agent_states : (n_agents, 4)  — [px, py, vx, vy]
     goal_states  : (n_agents, 4)
     obstacle_positions : (n_obs, 4) or None
-    comm_radius : float
+    comm_radius : float or (n_agents,) tensor
+        If tensor, each agent has its own sensing radius.
     node_dim : int (default 3)
     edge_dim : int (default 4)
 
@@ -84,7 +85,14 @@ def build_swarm_graph_from_states(
     diff = all_pos.unsqueeze(1) - agent_pos.unsqueeze(0)   # (N, n, 2)
     dist = torch.norm(diff, dim=-1)                        # (N, n)
 
-    mask = dist <= comm_radius
+    # Dynamic comm_radius: per-receiver agent threshold
+    if isinstance(comm_radius, torch.Tensor):
+        # comm_radius: (n,) → threshold per receiver (column)
+        cr = comm_radius.unsqueeze(0)  # (1, n)
+    else:
+        cr = comm_radius  # scalar broadcast
+
+    mask = dist <= cr
     # Remove self-loops (agent→itself)
     for i in range(n_agents):
         mask[i, i] = False
@@ -119,7 +127,7 @@ def build_vectorized_swarm_graph(
     agent_states: torch.Tensor,
     goal_states: torch.Tensor,
     obstacle_states: torch.Tensor,
-    comm_radius: float,
+    comm_radius: Union[float, torch.Tensor],
     node_dim: int = 3,
     edge_dim: int = 4,
 ) -> GraphsTuple:
@@ -131,7 +139,8 @@ def build_vectorized_swarm_graph(
     agent_states    : (B, n_agents, 4)
     goal_states     : (B, n_agents, 4)
     obstacle_states : (B, n_obs, 4)
-    comm_radius     : float
+    comm_radius     : float or (B, n_agents) tensor
+        If tensor, each agent in each batch has its own sensing radius.
     node_dim, edge_dim : int
 
     Returns
@@ -171,12 +180,25 @@ def build_vectorized_swarm_graph(
     receivers_parts = []
     edges_parts = []
 
+    # Prepare dynamic comm_radius threshold
+    # comm_radius_bn: (B, n) — per-receiver agent threshold
+    if isinstance(comm_radius, torch.Tensor):
+        comm_radius_bn = comm_radius  # (B, n)
+    else:
+        comm_radius_bn = None  # use scalar
+
     # Agent–Agent edges
     if n > 1:
         ap = agent_states[:, :, :2]  # (B, n, 2)
         diff_aa = ap.unsqueeze(2) - ap.unsqueeze(1)  # (B, n, n, 2)
         dist_aa = torch.norm(diff_aa, dim=-1)         # (B, n, n)
-        aa_mask = dist_aa <= comm_radius
+
+        if comm_radius_bn is not None:
+            # Per-receiver threshold: (B, 1, n) — receiver is dim 2
+            aa_mask = dist_aa <= comm_radius_bn.unsqueeze(1)  # (B, n, n)
+        else:
+            aa_mask = dist_aa <= comm_radius
+
         eye = torch.eye(n, dtype=torch.bool, device=device)
         aa_mask = aa_mask & ~eye.unsqueeze(0)
 
@@ -193,7 +215,13 @@ def build_vectorized_swarm_graph(
     pos_a = agent_states[:, :, :2]         # (B, n, 2)
     diff_na = pos_na.unsqueeze(2) - pos_a.unsqueeze(1)  # (B, K, n, 2)
     dist_na = torch.norm(diff_na, dim=-1)  # (B, K, n)
-    na_mask = dist_na <= comm_radius
+
+    if comm_radius_bn is not None:
+        # Per-receiver threshold: (B, 1, n)
+        na_mask = dist_na <= comm_radius_bn.unsqueeze(1)  # (B, K, n)
+    else:
+        na_mask = dist_na <= comm_radius
+
     b_na, k_na, a_na = torch.where(na_mask)
     if b_na.numel() > 0:
         dpos = non_agent[b_na, k_na, :2] - agent_states[b_na, a_na, :2]

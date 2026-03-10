@@ -60,8 +60,11 @@ def _velocity_to_accel(
     K_v: float,
     K_s: float,
     v_max: float,
+    u_max: float = None,
+    mass: float = 0.1,
+    n_drones: int = 3,
 ) -> torch.Tensor:
-    """Level 1+2: GNN velocity commands → PD → nominal acceleration.
+    """Level 1+2: GNN velocity commands → PD → nominal acceleration (pre-clamped).
 
     Parameters
     ----------
@@ -69,6 +72,9 @@ def _velocity_to_accel(
     agent_states : (..., 4) — [px, py, vx, vy]
     goal_states : (..., 4) — [gx, gy, gvx, gvy]
     scale_states : (..., 2) — [s, s_dot]
+    u_max : float or None — per-motor thrust limit. If given, pre-clamp output.
+    mass  : float — per-drone mass (for computing feasible acceleration).
+    n_drones : int — drones per swarm (default 3).
 
     Returns
     -------
@@ -90,7 +96,16 @@ def _velocity_to_accel(
     a_trans = K_v * (v_target - v_current)
     a_s = K_s * (s_dot_target - s_dot_current)
 
-    return torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+    u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+
+    # Pre-clamp: keep u_nom within physically feasible range
+    if u_max is not None:
+        a_max_trans = n_drones * u_max / mass * 0.7   # 70% margin for translation
+        a_max_scale = n_drones * u_max / mass * 0.3   # 30% margin for scale
+        u_nom[..., :2] = u_nom[..., :2].clamp(-a_max_trans, a_max_trans)
+        u_nom[..., 2]  = u_nom[..., 2].clamp(-a_max_scale, a_max_scale)
+
+    return u_nom
 
 
 def train(
@@ -153,8 +168,8 @@ def train(
 
     # Hierarchical velocity-command gains
     K_pos = vec_env.params.get("K_pos", 0.5)
-    K_v = vec_env.params.get("K_v", 10.0)
-    K_s = vec_env.params.get("K_s", 5.0)
+    K_v = vec_env.params.get("K_v", 2.0)
+    K_s = vec_env.params.get("K_s", 2.0)
 
     # Payload / HOCBF constants
     cable_length = vec_env.params["cable_length"]
@@ -220,10 +235,11 @@ def train(
                 pi_scaled[:, :, :2] *= v_max
                 pi_scaled[:, :, 2] *= s_dot_max
 
-                # Level 1+2: velocity → PD → acceleration
+                # Level 1+2: velocity → PD → acceleration (pre-clamped)
                 u_nom = _velocity_to_accel(
                     pi_scaled, vec_env._agent_states, goal_fixed,
                     vec_env._scale_states, K_pos, K_v, K_s, v_max,
+                    u_max=u_max, mass=mass,
                 )
 
                 # Level 3: QP solve
@@ -299,12 +315,13 @@ def train(
                 mb_goal = all_goal[idx]
                 mb_obs_st = all_obs_st[idx]
 
-                # ── Build graph ──
+                # ── Build graph (dynamic comm_radius) ──
+                dyn_cr = vec_env.comm_radius * mb_scale[:, :, 0]  # (mb, n)
                 mega = build_vectorized_swarm_graph(
                     agent_states=mb_agent,
                     goal_states=mb_goal,
                     obstacle_states=mb_obs_st,
-                    comm_radius=vec_env.comm_radius,
+                    comm_radius=dyn_cr,
                     node_dim=vec_env.node_dim,
                     edge_dim=vec_env.edge_dim,
                 )
@@ -319,10 +336,11 @@ def train(
                 pi_scaled[:, :, :2] = pi_scaled[:, :, :2] * v_max
                 pi_scaled[:, :, 2] = pi_scaled[:, :, 2] * s_dot_max
 
-                # ── Level 1+2: velocity → PD → acceleration ──
+                # ── Level 1+2: velocity → PD → acceleration (pre-clamped) ──
                 u_nom = _velocity_to_accel(
                     pi_scaled, mb_agent, mb_goal,
                     mb_scale, K_pos, K_v, K_s, v_max,
+                    u_max=u_max, mass=mass,
                 )
                 u_nom_flat = u_nom.reshape(mb_size * num_agents, 3)
 

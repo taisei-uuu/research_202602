@@ -74,8 +74,8 @@ class AffinePolicy(MethodController):
             v_max_cfg = cfg.get("v_max", 1.0)
             s_dot_max_cfg = cfg.get("s_dot_max", 1.0)
             K_pos = cfg.get("K_pos", 0.5)
-            K_v = cfg.get("K_v", 10.0)
-            K_s = cfg.get("K_s", 5.0)
+            K_v = cfg.get("K_v", 2.0)
+            K_s = cfg.get("K_s", 2.0)
 
             pi_scaled = pi_tanh.clone()
             pi_scaled[:, :2] *= v_max_cfg
@@ -95,6 +95,15 @@ class AffinePolicy(MethodController):
             a_trans = K_v * (v_target - v_current)
             a_s = K_s * (s_dot_target - s_dot_current)
             u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+
+            # Pre-clamp to physically feasible range
+            _u_max = env.params.get("u_max")
+            if _u_max is not None:
+                _mass = env.params.get("mass", 0.1)
+                a_max_t = 3 * _u_max / _mass * 0.7
+                a_max_s = 3 * _u_max / _mass * 0.3
+                u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
+                u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
             # Level 3: QP
             sc = env.scale_states[:, 0]

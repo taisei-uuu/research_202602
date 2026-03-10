@@ -72,8 +72,8 @@ class SwarmIntegrator:
         "s_dot_max": 1.0,        # maximum scale rate
         # Hierarchical velocity-command gains
         "K_pos": 0.5,            # proportional gain: goal_err → target velocity
-        "K_v": 10.0,             # PD gain: velocity error → acceleration (translation)
-        "K_s": 5.0,              # PD gain: velocity error → acceleration (scale)
+        "K_v": 2.0,             # PD gain: velocity error → acceleration (translation)
+        "K_s": 2.0,              # PD gain: velocity error → acceleration (scale)
         # Payload parameters
         "cable_length": 1.0,     # l (m)
         "gravity": 9.81,         # g (m/s^2)
@@ -136,6 +136,7 @@ class SwarmIntegrator:
 
     @property
     def comm_radius(self) -> float:
+        """Base communication radius (before scale multiplication)."""
         return self.params["comm_radius"]
 
     @property
@@ -323,8 +324,8 @@ class SwarmIntegrator:
         Level 2: a_nom = K_v * (v_target - v_current)
         """
         K_pos = self.params.get("K_pos", 0.5)
-        K_v = self.params.get("K_v", 10.0)
-        K_s = self.params.get("K_s", 5.0)
+        K_v = self.params.get("K_v", 2.0)
+        K_s = self.params.get("K_s", 2.0)
         v_max = self.params.get("v_max", 1.0)
 
         if v_target is None:
@@ -379,11 +380,14 @@ class SwarmIntegrator:
 
     # ── Graph builder ─────────────────────────────────────────────────
     def _get_graph(self) -> GraphsTuple:
+        # Dynamic comm_radius: comm_base * s  → (n,)
+        s = self.scale_states[:, 0]  # (n,)
+        dyn_cr = self.comm_radius * s
         return build_swarm_graph_from_states(
             agent_states=self.agent_states,
             goal_states=self.goal_states,
             obstacle_positions=self._obstacle_states,
-            comm_radius=self.comm_radius,
+            comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
         )

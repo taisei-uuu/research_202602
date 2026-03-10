@@ -152,8 +152,8 @@ def run_simulation(
     v_max_cfg = cfg.get("v_max", 1.0) if cfg else 1.0
     s_dot_max_cfg = cfg.get("s_dot_max", 1.0) if cfg else 1.0
     K_pos_cfg = cfg.get("K_pos", 0.5) if cfg else 0.5
-    K_v_cfg = cfg.get("K_v", 10.0) if cfg else 10.0
-    K_s_cfg = cfg.get("K_s", 5.0) if cfg else 5.0
+    K_v_cfg = cfg.get("K_v", 2.0) if cfg else 2.0
+    K_s_cfg = cfg.get("K_s", 2.0) if cfg else 2.0
 
     for _ in range(max_steps):
         if policy_net is not None:
@@ -179,6 +179,15 @@ def run_simulation(
                 a_trans = K_v_cfg * (v_target - v_current)
                 a_s = K_s_cfg * (s_dot_target - s_dot_current)
                 u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+
+                # Pre-clamp to physically feasible range
+                _u_max = env.params.get("u_max")
+                if _u_max is not None:
+                    _mass = env.params.get("mass", 0.1)
+                    a_max_t = 3 * _u_max / _mass * 0.7
+                    a_max_s = 3 * _u_max / _mass * 0.3
+                    u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
+                    u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
                 # Level 3: QP
                 sc = env.scale_states[:, 0]
@@ -401,6 +410,10 @@ def create_video(
             cx = trajectories[sim_step, i, 0]
             cy = trajectories[sim_step, i, 1]
             sensing_circles[i].center = (cx, cy)
+            # Dynamic sensing radius: comm_radius * s
+            if scale_traj is not None and sim_step < scale_traj.shape[0]:
+                s_sense = float(scale_traj[sim_step, i, 0])
+                sensing_circles[i].set_radius(comm_radius * s_sense)
 
             if is_swarm:
                 # Get current scale
@@ -550,9 +563,13 @@ def plot_trajectories(
 
     # Sensing radius at final
     for i in range(n_agents):
-        sc = plt.Circle((finals[i, 0], finals[i, 1]), comm_radius,
-                        fill=False, linestyle="--", linewidth=1.0,
-                        edgecolor=colors[i], alpha=0.25, zorder=1)
+        s_final_i = 1.0
+        if scale_traj is not None:
+            s_final_i = float(scale_traj[-1, i, 0])
+        sc = plt.Circle((finals[i, 0], finals[i, 1]),
+                        comm_radius * s_final_i,
+                        fill=False, linestyle="--", linewidth=0.8,
+                        edgecolor=colors[i], alpha=0.25, zorder=3)
         ax.add_patch(sc)
 
     ax.set_title(

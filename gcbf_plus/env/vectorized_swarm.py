@@ -55,8 +55,8 @@ class VectorizedSwarmEnv:
         "s_dot_max": 1.0,
         # Hierarchical velocity-command gains
         "K_pos": 0.5,          # proportional gain: goal_err → target velocity
-        "K_v": 10.0,           # PD gain: velocity error → acceleration (translation)
-        "K_s": 5.0,            # PD gain: velocity error → acceleration (scale)
+        "K_v": 2.0,            # PD gain: velocity error → acceleration (translation)
+        "K_s": 2.0,            # PD gain: velocity error → acceleration (scale)
         # Payload parameters
         "cable_length": 1.0,
         "gravity": 9.81,
@@ -122,7 +122,13 @@ class VectorizedSwarmEnv:
 
     @property
     def comm_radius(self) -> float:
+        """Base communication radius (before scale multiplication)."""
         return self.params["comm_radius"]
+
+    def dynamic_comm_radius(self) -> torch.Tensor:
+        """Dynamic comm_radius: comm_base * s per agent.  Returns (B, n)."""
+        s = self._scale_states[:, :, 0]  # (B, n)
+        return self.comm_radius * s
 
     @property
     def n_obs(self) -> int:
@@ -317,8 +323,8 @@ class VectorizedSwarmEnv:
             Target scale velocity. If None, uses 0.
         """
         K_pos = self.params.get("K_pos", 0.5)
-        K_v = self.params.get("K_v", 10.0)
-        K_s = self.params.get("K_s", 5.0)
+        K_v = self.params.get("K_v", 2.0)
+        K_s = self.params.get("K_s", 2.0)
         v_max = self.params.get("v_max", 1.0)
 
         # Level 1: target velocity from proportional goal tracking
@@ -380,14 +386,19 @@ class VectorizedSwarmEnv:
         return agent_collision | obs_collision
 
     # ── Graph builder ─────────────────────────────────────────────────
-    def build_batch_graph(self, agent_states=None) -> GraphsTuple:
+    def build_batch_graph(self, agent_states=None, scale_states=None) -> GraphsTuple:
         if agent_states is None:
             agent_states = self._agent_states
+        if scale_states is None:
+            scale_states = self._scale_states
+        # Dynamic comm_radius: comm_base * s  → (B, n)
+        s = scale_states[:, :, 0]
+        dyn_cr = self.comm_radius * s
         return build_vectorized_swarm_graph(
             agent_states=agent_states,
             goal_states=self._goal_states,
             obstacle_states=self._obstacle_states,
-            comm_radius=self.comm_radius,
+            comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
         )
