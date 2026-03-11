@@ -121,7 +121,7 @@ def train(
     lr_actor: float = 1e-4,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
-    coef_reg: float = 0.01,
+    coef_scale: float = 0.3,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -184,7 +184,7 @@ def train(
 
     history: Dict[str, list] = {
         "step": [], "loss/total": [], "loss/goal": [],
-        "loss/qp": [], "loss/reg": [],
+        "loss/qp": [], "loss/scale": [],
     }
 
     print("=" * 60)
@@ -195,7 +195,7 @@ def train(
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
-    print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}  coef_reg={coef_reg}")
+    print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}  coef_scale={coef_scale}")
     print("=" * 60)
     t_start = time.time()
 
@@ -379,22 +379,23 @@ def train(
                     )
 
                 # ── Loss ──
-                goal_dist = torch.norm(
-                    states_flat[:, :2] - goals_flat[:, :2], dim=-1
-                )
-                # QP intervention tracking
-                qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
+                # Extract per-agent scale and GNN scale output for L_scale
+                s_flat = mb_scale[:, :, 0].reshape(-1)          # (mb*n,)
+                s_dot_target_flat = pi_scaled[:, :, 2].reshape(-1)  # (mb*n,) — has grad
 
                 loss, info = compute_affine_loss(
                     pi_action=pi_agents.reshape(-1, 3),
-                    u_at=u_nom_flat,
+                    u_nom=u_nom_flat,
                     u_qp=u_qp_flat,
-                    goal_dist=goal_dist,
+                    s_current=s_flat,
+                    s_dot_target=s_dot_target_flat,
+                    s_max=s_max,
                     coef_goal=coef_goal,
                     coef_qp=coef_qp,
-                    coef_reg=coef_reg,
+                    coef_scale=coef_scale,
                 )
-                # Add mean/max QP intervention to info
+                # QP intervention tracking
+                qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
                 info["qp_cut/mean"] = qp_intervention.mean().item()
                 info["qp_cut/max"] = qp_intervention.max().item()
 
@@ -440,7 +441,7 @@ def train(
                 f"  |  loss {avg_info.get('loss/total', 0):.4f}"
                 f"  goal {avg_info.get('loss/goal', 0):.4f}"
                 f"  qp {avg_info.get('loss/qp', 0):.4f}"
-                f"  reg {avg_info.get('loss/reg', 0):.4f}"
+                f"  scale {avg_info.get('loss/scale', 0):.4f}"
                 f"  |  upd={n_updates}"
                 f"  |  s: {mean_s:.2f} [{min_s:.2f},{max_s:.2f}]"
                 f"  |  γ: {mean_gamma:.3f} p95={p95_gamma:.3f}"
@@ -503,7 +504,7 @@ def main():
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--coef_goal", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
-    parser.add_argument("--coef_reg", type=float, default=0.01)
+    parser.add_argument("--coef_scale", type=float, default=0.3)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")

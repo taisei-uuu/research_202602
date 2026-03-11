@@ -1,10 +1,9 @@
 """
-Loss functions for Affine-Transform Swarm training.
+Loss functions for Hierarchical Velocity-Command Swarm training.
 
-New RL-style losses (no safe/unsafe labeling):
-    L_goal:   Goal-reaching incentive (penalize distance to goal)
-    L_qp:     QP-intervention penalty (penalize ‖u_QP - u_AT‖²)
-    L_reg:    Action regularization (penalize ‖π(x)‖²)
+    L_goal:   Penalize GNN translation offset (keep velocity close to LQR)
+    L_qp:     QP-intervention penalty (penalize ||u_QP - u_nom||²)
+    L_scale:  Scale expansion incentive: -mean(ṡ_target * (s_max - s))
 """
 
 from __future__ import annotations
@@ -12,32 +11,37 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 import torch
-import torch.nn.functional as F
 
 
 def compute_affine_loss(
     pi_action: torch.Tensor,
-    u_at: torch.Tensor,
+    u_nom: torch.Tensor,
     u_qp: torch.Tensor,
-    goal_dist: torch.Tensor,
+    s_current: torch.Tensor,
+    s_dot_target: torch.Tensor,
+    s_max: float,
     coef_goal: float = 1.0,
-    coef_qp: float = 1.0,
-    coef_reg: float = 0.01,
+    coef_qp: float = 2.0,
+    coef_scale: float = 0.3,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    Compute the affine-transform training loss.
+    Compute the hierarchical velocity-command training loss.
 
     Parameters
     ----------
     pi_action : (N, 3)
-        GNN offset output π_φ(x).
-    u_at : (N, 3)
-        Full affine parameter u_AT = u_nom + π_φ(x).
+        GNN output π_φ(x) = (Δv_x, Δv_y, ṡ_target).
+    u_nom : (N, 3)
+        Nominal acceleration [a_cx, a_cy, a_s] (has gradient through GNN).
     u_qp : (N, 3)
-        QP-corrected safe affine parameters.
-    goal_dist : (N,)
-        Distance to goal for each agent (‖P_c - P_goal‖).
-    coef_goal, coef_qp, coef_reg : float
+        QP-corrected safe accelerations (detached).
+    s_current : (N,)
+        Current scale value per agent.
+    s_dot_target : (N,)
+        GNN's scale rate output ṡ_target (has gradient).
+    s_max : float
+        Maximum scale value.
+    coef_goal, coef_qp, coef_scale : float
         Loss coefficients.
 
     Returns
@@ -45,29 +49,33 @@ def compute_affine_loss(
     total_loss : scalar tensor
     info : dict of scalar loss values for logging
     """
-    # ── L_goal: penalize distance to goal (reward shaping) ──
-    loss_goal = goal_dist.mean()
+    # ── L_goal: penalize translation velocity offset from LQR ──
+    # pi_action[:, :2] = (Δv_x, Δv_y), keep close to zero = follow LQR
+    loss_goal = (pi_action[:, :2] ** 2).sum(dim=-1).mean()
 
     # ── L_qp: penalize QP correction magnitude ──
-    # This encourages the policy to output already-safe actions
-    qp_correction = u_qp - u_at
+    # u_qp should be detached; gradient flows through u_nom
+    qp_correction = u_qp - u_nom
     loss_qp = (qp_correction ** 2).sum(dim=-1).mean()
 
-    # ── L_reg: L2 regularization on GNN offset ──
-    loss_reg = (pi_action ** 2).sum(dim=-1).mean()
+    # ── L_scale: incentivize expansion toward s_max ──
+    # -mean(ṡ_target * (s_max - s))
+    # When s < s_max: positive ṡ → loss decreases (good)
+    # When s ≈ s_max: term ≈ 0 regardless
+    loss_scale = -(s_dot_target * (s_max - s_current)).mean()
 
     # ── Total ──
     total_loss = (
         coef_goal * loss_goal
         + coef_qp * loss_qp
-        + coef_reg * loss_reg
+        + coef_scale * loss_scale
     )
 
     info = {
         "loss/total": total_loss.item(),
         "loss/goal": loss_goal.item(),
         "loss/qp": loss_qp.item(),
-        "loss/reg": loss_reg.item(),
+        "loss/scale": loss_scale.item(),
     }
 
     return total_loss, info
