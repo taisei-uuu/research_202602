@@ -53,10 +53,12 @@ def compute_affine_loss(
     # pi_action[:, :2] = (Δv_x, Δv_y), keep close to zero = follow LQR
     loss_goal = (pi_action[:, :2] ** 2).sum(dim=-1).mean()
 
-    # ── L_qp: penalize QP correction on TRANSLATION only ──
-    # Scale corrections are excluded so L_qp doesn't incentivize shrinking
-    qp_correction_trans = u_qp[:, :2] - u_nom[:, :2]
-    loss_qp = (qp_correction_trans ** 2).sum(dim=-1).mean()
+    # ── L_qp: penalize QP correction (translation full, scale weak) ──
+    # Scale correction is weighted at 0.1x to avoid "always shrink" while
+    # still giving the GNN a signal for when shrinking is needed.
+    qp_trans = (u_qp[:, :2] - u_nom[:, :2]).pow(2).sum(dim=-1)
+    qp_scale = (u_qp[:, 2] - u_nom[:, 2]).pow(2)
+    loss_qp = (qp_trans + 0.1 * qp_scale).mean()
 
     # ── L_scale: incentivize expansion toward s_max ──
     # -mean(ṡ_target * (s_max - s))
