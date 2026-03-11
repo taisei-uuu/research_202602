@@ -62,7 +62,7 @@ class SwarmIntegrator:
         "r_margin": 0.2,         # bounding circle margin (m)
         "comm_radius": 3.0,
         "n_obs": 2,
-        "obs_len_range": (0.2, 0.6),
+        "obs_len_range": (1.0, 3.0),
         "mass": 0.1,
         "u_max": 0.3,
         "v_max": 1.0,
@@ -166,7 +166,7 @@ class SwarmIntegrator:
 
         # Obstacles
         self._obstacles = []
-        obs_lo, obs_hi = self.params.get("obs_len_range", (0.1, 0.3))
+        obs_lo, obs_hi = self.params.get("obs_len_range", (1.0, 3.0))
         for _ in range(n_obs):
             cx = rng.uniform(margin, area - margin)
             cy = rng.uniform(margin, area - margin)
