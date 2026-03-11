@@ -121,7 +121,7 @@ def train(
     lr_actor: float = 1e-4,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
-    coef_scale: float = 0.3,
+    coef_scale: float = 0.5,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -504,7 +504,7 @@ def main():
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--coef_goal", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
-    parser.add_argument("--coef_scale", type=float, default=0.3)
+    parser.add_argument("--coef_scale", type=float, default=0.5)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")

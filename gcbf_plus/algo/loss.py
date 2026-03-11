@@ -22,7 +22,7 @@ def compute_affine_loss(
     s_max: float,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
-    coef_scale: float = 0.3,
+    coef_scale: float = 0.5,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute the hierarchical velocity-command training loss.
@@ -53,10 +53,10 @@ def compute_affine_loss(
     # pi_action[:, :2] = (Δv_x, Δv_y), keep close to zero = follow LQR
     loss_goal = (pi_action[:, :2] ** 2).sum(dim=-1).mean()
 
-    # ── L_qp: penalize QP correction magnitude ──
-    # u_qp should be detached; gradient flows through u_nom
-    qp_correction = u_qp - u_nom
-    loss_qp = (qp_correction ** 2).sum(dim=-1).mean()
+    # ── L_qp: penalize QP correction on TRANSLATION only ──
+    # Scale corrections are excluded so L_qp doesn't incentivize shrinking
+    qp_correction_trans = u_qp[:, :2] - u_nom[:, :2]
+    loss_qp = (qp_correction_trans ** 2).sum(dim=-1).mean()
 
     # ── L_scale: incentivize expansion toward s_max ──
     # -mean(ṡ_target * (s_max - s))
