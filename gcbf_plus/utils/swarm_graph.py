@@ -97,6 +97,13 @@ def build_swarm_graph_from_states(
     for i in range(n_agents):
         mask[i, i] = False
 
+    # ---- NEW: Global Goal Visibility ----
+    # The first `n_agents` nodes in all_states_cat AFTER the initial `n_agents` nodes are the goals.
+    # Indices [n_agents : 2*n_agents] correspond to goals 0 to n_agents-1.
+    # We want goal_i (index n_agents + i) to be visible to agent_i (receiver column i).
+    for i in range(n_agents):
+        mask[n_agents + i, i] = True
+
     s_idx, r_idx = torch.where(mask)
 
     if s_idx.numel() > 0:
@@ -221,6 +228,16 @@ def build_vectorized_swarm_graph(
         na_mask = dist_na <= comm_radius_bn.unsqueeze(1)  # (B, K, n)
     else:
         na_mask = dist_na <= comm_radius
+
+    # ---- NEW: Global Goal Visibility ----
+    # The first `n` elements of the `K` dimension in `non_agent` are the goal nodes.
+    # We want goal `i` to always be visible to agent `i`.
+    # Create an identity matrix to represent this one-to-one mapping
+    # and force those elements in the mask to be True.
+    goal_identity = torch.eye(n, dtype=torch.bool, device=device).unsqueeze(0).expand(B, -1, -1)
+    
+    # K could be n (no obstacles) or n + n_obs. We just overwrite the first nx_n block.
+    na_mask[:, :n, :] = na_mask[:, :n, :] | goal_identity
 
     b_na, k_na, a_na = torch.where(na_mask)
     if b_na.numel() > 0:

@@ -122,10 +122,12 @@ def run_simulation(
             mode = "lqr"
 
     if is_swarm:
+        # Use full cfg to ensure mass, gravity, obs_len_range, etc. exactly match training
+        env_params = cfg.copy() if cfg else {}
+        env_params.update({"n_obs": n_obs, "comm_radius": comm_radius})
         env = SwarmIntegrator(
             num_agents=num_agents, area_size=area_size, dt=dt, max_steps=max_steps,
-            params={"n_obs": n_obs, "comm_radius": comm_radius, "R_form": R_form,
-                    "r_margin": r_margin, "s_min": s_min, "s_max": s_max},
+            params=env_params,
         )
     else:
         env = DoubleIntegrator(
@@ -186,7 +188,15 @@ def run_simulation(
                     _mass = env.params.get("mass", 0.1)
                     a_max_t = 3 * _u_max / _mass * 0.7
                     a_max_s = 3 * _u_max / _mass * 0.3
-                    u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
+                    
+                    # NEW: Payload-aware clamping
+                    # The payload HOCBF strictly limits acceleration to ~0.4 m/s^2.
+                    # If LQR asks for more, QP will intervene heavily and cause the GNN
+                    # to learn a constant bias. We manually cap translation acceleration here.
+                    a_max_payload = 0.5
+                    actual_a_max_t = min(a_max_t, a_max_payload)
+                    
+                    u_nom[:, :2] = u_nom[:, :2].clamp(-actual_a_max_t, actual_a_max_t)
                     u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
                 # Level 3: QP

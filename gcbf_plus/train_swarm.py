@@ -102,7 +102,15 @@ def _velocity_to_accel(
     if u_max is not None:
         a_max_trans = n_drones * u_max / mass * 0.7   # 70% margin for translation
         a_max_scale = n_drones * u_max / mass * 0.3   # 30% margin for scale
-        clamped_trans = u_nom[..., :2].clamp(-a_max_trans, a_max_trans)
+        
+        # NEW: Payload-aware clamping
+        # The payload HOCBF strictly limits acceleration to ~0.4 m/s^2.
+        # If LQR requests more, QP intervenes massively (L_qp explodes),
+        # causing the GNN to learn an arbitrary bias to negate the LQR.
+        a_max_payload = 0.5
+        actual_a_max_t = min(a_max_trans, a_max_payload)
+        
+        clamped_trans = u_nom[..., :2].clamp(-actual_a_max_t, actual_a_max_t)
         clamped_scale = u_nom[..., 2:].clamp(-a_max_scale, a_max_scale)
         u_nom = torch.cat([clamped_trans, clamped_scale], dim=-1)
 
