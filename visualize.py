@@ -248,7 +248,7 @@ def run_simulation(
                     other_agent_s=other_s_flat,
                     other_agent_s_dot=other_sd_flat,
                     R_form=R_form,
-                    r_margin=r_margin + 0.2, # Physical margin is larger than drawn margin
+                    r_margin=r_margin + 0.1, # Physical margin is slightly larger than drawn margin
                     mass=env.params["mass"],
                     s_min=s_min,
                     s_max=s_max,

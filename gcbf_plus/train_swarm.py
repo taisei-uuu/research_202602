@@ -300,7 +300,7 @@ def train(
                     other_agent_vel=other_vel_flat,
                     other_agent_s=other_s_flat,
                     other_agent_s_dot=other_sd_flat,
-                    R_form=R_form, r_margin=r_margin + 0.2, mass=mass,
+                    R_form=R_form, r_margin=r_margin + 0.1, mass=mass,  # Reduced from 0.2 to leave room for shrinking
                     s_min=s_min, s_max=s_max,
                     payload_states=ps_flat,
                     cable_length=cable_length, gravity=gravity,
@@ -433,7 +433,7 @@ def train(
                         other_agent_vel=mb_other_vel_flat,
                         other_agent_s=mb_other_s_flat,
                         other_agent_s_dot=mb_other_sd_flat,
-                        R_form=R_form, r_margin=r_margin + 0.2, mass=mass,
+                        R_form=R_form, r_margin=r_margin + 0.1, mass=mass,
                         s_min=s_min, s_max=s_max,
                         payload_states=ps_f,
                         cable_length=cable_length, gravity=gravity,
