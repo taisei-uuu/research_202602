@@ -42,6 +42,11 @@ def solve_affine_qp(
     R_form: float = 0.5,
     r_margin: float = 0.2,
     mass: float = 0.1,
+    # Agent-Agent CBF data
+    other_agent_pos: Optional[torch.Tensor] = None,
+    other_agent_vel: Optional[torch.Tensor] = None,
+    other_agent_s: Optional[torch.Tensor] = None,
+    other_agent_s_dot: Optional[torch.Tensor] = None,
     # Scale CBF params
     s_min: float = 0.4,
     s_max: float = 1.5,
@@ -188,6 +193,53 @@ def solve_affine_qp(
                 A_as = -2.0 * safe_dist * R_form
 
                 rhs = h_dot_drift + alpha_obs * h_obs
+                A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
+
+                c_val = (A_vec * X).sum(dim=-1) + rhs
+                violated = c_val < 0
+                if violated.any():
+                    A_norm_sq = (A_vec * A_vec).sum(dim=-1)
+                    lam = torch.relu(-c_val / (A_norm_sq + 1e-8))
+                    correction = lam.unsqueeze(-1) * A_vec
+                    X = torch.where(
+                        violated.unsqueeze(-1).expand_as(X),
+                        X + correction,
+                        X,
+                    )
+
+        # ------------------------------------------------------------
+        # 2.5 Agent-Agent CBF constraints (HARD)
+        # ------------------------------------------------------------
+        has_other_agents = (other_agent_pos is not None and other_agent_vel is not None
+                            and other_agent_s is not None and other_agent_s_dot is not None
+                            and agent_pos is not None and agent_vel is not None
+                            and s is not None and s_dot is not None)
+        if has_other_agents:
+            n_other = other_agent_pos.shape[1]
+            for j in range(n_other):
+                o_pos = other_agent_pos[:, j, :]
+                o_vel = other_agent_vel[:, j, :]
+                o_s = other_agent_s[:, j]
+                o_s_dot = other_agent_s_dot[:, j]
+
+                r_sw = R_form * s + r_margin
+                r_other = R_form * o_s + r_margin
+
+                dp = agent_pos - o_pos
+                dv = agent_vel - o_vel
+
+                dist_sq = (dp * dp).sum(dim=-1)
+                safe_dist = r_sw + r_other
+                h_agent = dist_sq - safe_dist ** 2
+
+                h_dot_drift = (2.0 * (dp * dv).sum(dim=-1)
+                               - 2.0 * safe_dist * R_form * (s_dot + o_s_dot))
+
+                A_cx = 2.0 * dp[:, 0] / mass
+                A_cy = 2.0 * dp[:, 1] / mass
+                A_as = -2.0 * safe_dist * R_form
+
+                rhs = h_dot_drift + alpha_obs * h_agent
                 A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
 
                 c_val = (A_vec * X).sum(dim=-1) + rhs

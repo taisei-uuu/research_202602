@@ -267,11 +267,39 @@ def train(
                     obs_c_exp = None
                     obs_hs_exp = None
 
+                # Agent-Agent info
+                if num_agents > 1:
+                    dev = vec_env._agent_states.device
+                    agent_idx = torch.arange(num_agents, device=dev)
+                    mask = agent_idx.unsqueeze(0) != agent_idx.unsqueeze(1) # (n, n)
+                    mask_b = mask.unsqueeze(0).expand(batch_size, num_agents, num_agents)
+                    
+                    pos_other = vec_env._agent_states[:, :, :2].unsqueeze(1).expand(batch_size, num_agents, num_agents, 2)
+                    other_pos_flat = pos_other[mask_b].view(BN, num_agents - 1, 2)
+                    
+                    vel_other = vec_env._agent_states[:, :, 2:4].unsqueeze(1).expand(batch_size, num_agents, num_agents, 2)
+                    other_vel_flat = vel_other[mask_b].view(BN, num_agents - 1, 2)
+                    
+                    s_other = vec_env._scale_states[:, :, 0].unsqueeze(1).expand(batch_size, num_agents, num_agents)
+                    other_s_flat = s_other[mask_b].view(BN, num_agents - 1)
+                    
+                    sd_other = vec_env._scale_states[:, :, 1].unsqueeze(1).expand(batch_size, num_agents, num_agents)
+                    other_sd_flat = sd_other[mask_b].view(BN, num_agents - 1)
+                else:
+                    other_pos_flat = None
+                    other_vel_flat = None
+                    other_s_flat = None
+                    other_sd_flat = None
+
                 u_qp_flat = solve_affine_qp(
                     u_nom=u_nom_flat,
                     obs_centers=obs_c_exp, obs_half_sizes=obs_hs_exp,
                     agent_pos=pos_flat, agent_vel=vel_flat,
                     s=s_flat, s_dot=s_dot_flat,
+                    other_agent_pos=other_pos_flat,
+                    other_agent_vel=other_vel_flat,
+                    other_agent_s=other_s_flat,
+                    other_agent_s_dot=other_sd_flat,
                     R_form=R_form, r_margin=r_margin, mass=mass,
                     s_min=s_min, s_max=s_max,
                     payload_states=ps_flat,
@@ -372,11 +400,39 @@ def train(
                         obs_c_exp = None
                         obs_hs_exp = None
 
+                    # Agent-Agent info
+                    if num_agents > 1:
+                        dev = mb_agent.device
+                        agent_idx = torch.arange(num_agents, device=dev)
+                        mask = agent_idx.unsqueeze(0) != agent_idx.unsqueeze(1)
+                        mask_b = mask.unsqueeze(0).expand(mb_size, num_agents, num_agents)
+                        
+                        pos_other = mb_agent[:, :, :2].unsqueeze(1).expand(mb_size, num_agents, num_agents, 2)
+                        mb_other_pos_flat = pos_other[mask_b].reshape(mb_size * num_agents, num_agents - 1, 2)
+                        
+                        vel_other = mb_agent[:, :, 2:4].unsqueeze(1).expand(mb_size, num_agents, num_agents, 2)
+                        mb_other_vel_flat = vel_other[mask_b].reshape(mb_size * num_agents, num_agents - 1, 2)
+                        
+                        s_other = mb_scale[:, :, 0].unsqueeze(1).expand(mb_size, num_agents, num_agents)
+                        mb_other_s_flat = s_other[mask_b].reshape(mb_size * num_agents, num_agents - 1)
+                        
+                        sd_other = mb_scale[:, :, 1].unsqueeze(1).expand(mb_size, num_agents, num_agents)
+                        mb_other_sd_flat = sd_other[mask_b].reshape(mb_size * num_agents, num_agents - 1)
+                    else:
+                        mb_other_pos_flat = None
+                        mb_other_vel_flat = None
+                        mb_other_s_flat = None
+                        mb_other_sd_flat = None
+
                     u_qp_flat = solve_affine_qp(
                         u_nom=u_nom_flat.detach(),
                         obs_centers=obs_c_exp, obs_half_sizes=obs_hs_exp,
                         agent_pos=states_flat[:, :2], agent_vel=states_flat[:, 2:4],
                         s=s_f, s_dot=sd_f,
+                        other_agent_pos=mb_other_pos_flat,
+                        other_agent_vel=mb_other_vel_flat,
+                        other_agent_s=mb_other_s_flat,
+                        other_agent_s_dot=mb_other_sd_flat,
                         R_form=R_form, r_margin=r_margin, mass=mass,
                         s_min=s_min, s_max=s_max,
                         payload_states=ps_f,

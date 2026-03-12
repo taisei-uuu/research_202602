@@ -212,6 +212,29 @@ def run_simulation(
                     oc = None
                     ohs = None
 
+                # Agent-Agent info
+                if num_agents > 1:
+                    dev = pos.device
+                    agent_idx = torch.arange(num_agents, device=dev)
+                    mask = agent_idx.unsqueeze(0) != agent_idx.unsqueeze(1)
+                    
+                    pos_other = pos.unsqueeze(0).expand(num_agents, num_agents, 2)
+                    other_pos_flat = pos_other[mask].reshape(num_agents, num_agents - 1, 2)
+                    
+                    vel_other = v_current.unsqueeze(0).expand(num_agents, num_agents, 2)
+                    other_vel_flat = vel_other[mask].reshape(num_agents, num_agents - 1, 2)
+                    
+                    s_other = sc.unsqueeze(0).expand(num_agents, num_agents)
+                    other_s_flat = s_other[mask].reshape(num_agents, num_agents - 1)
+                    
+                    sd_other = sd.unsqueeze(0).expand(num_agents, num_agents)
+                    other_sd_flat = sd_other[mask].reshape(num_agents, num_agents - 1)
+                else:
+                    other_pos_flat = None
+                    other_vel_flat = None
+                    other_s_flat = None
+                    other_sd_flat = None
+
                 u = solve_affine_qp(
                     u_nom=u_nom,
                     obs_centers=oc,
@@ -220,6 +243,10 @@ def run_simulation(
                     agent_vel=v_current,
                     s=sc,
                     s_dot=sd,
+                    other_agent_pos=other_pos_flat,
+                    other_agent_vel=other_vel_flat,
+                    other_agent_s=other_s_flat,
+                    other_agent_s_dot=other_sd_flat,
                     R_form=R_form,
                     r_margin=r_margin,
                     mass=env.params["mass"],
