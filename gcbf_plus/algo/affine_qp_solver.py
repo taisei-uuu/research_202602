@@ -49,11 +49,11 @@ def solve_affine_qp(
     other_agent_s_dot: Optional[torch.Tensor] = None,
     # Scale CBF params
     s_min: float = 0.4,
-    r_margin: float = 0.2,
-    mass: float = 0.1,
-    alpha_obs: float = 0.9, # Set to 0.9 per user request
+    s_max: float = 1.5,
     alpha_scale: float = 2.0,
     # Obstacle CBF params
+    alpha_obs: float = 0.9, # Set to 0.9 per user request
+    # HOCBF payload swing data (dynamic γ_max)
     payload_states: Optional[torch.Tensor] = None,
     cable_length: float = 1.0,
     gravity: float = 9.81,
