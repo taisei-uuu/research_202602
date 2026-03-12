@@ -52,7 +52,7 @@ def solve_affine_qp(
     s_max: float = 1.5,
     alpha_scale: float = 2.0,
     # Obstacle CBF params
-    alpha_obs: float = 0.5, # Reduced from 1.0 for earlier braking
+    alpha_obs: float = 0.8, # Reverted from 0.5 to encourage scale shrinking
     # HOCBF payload swing data (dynamic γ_max)
     payload_states: Optional[torch.Tensor] = None,
     cable_length: float = 1.0,
