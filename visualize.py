@@ -140,11 +140,20 @@ def run_simulation(
     trajectories: List[np.ndarray] = []
     payload_trajectories: List[np.ndarray] = []
     scale_trajectories: List[np.ndarray] = []
+    edge_trajectories: List[np.ndarray] = []
+
     trajectories.append(env.agent_states.detach().numpy().copy())
     if hasattr(env, 'payload_states') and env.payload_states is not None:
         payload_trajectories.append(env.payload_states.detach().numpy().copy())
     if hasattr(env, 'scale_states') and env.scale_states is not None:
         scale_trajectories.append(env.scale_states.detach().numpy().copy())
+    
+    # Store initial graph edges
+    try:
+        init_graph = env._get_graph()
+        edge_trajectories.append(init_graph.edge_index.detach().numpy().copy())
+    except Exception:
+        edge_trajectories.append(np.empty((2, 0)))
 
     goals = env.goal_states.detach().numpy().copy()
     obstacle_info = [(obs.center.numpy().copy(), obs.half_size.numpy().copy())
@@ -269,6 +278,14 @@ def run_simulation(
             payload_trajectories.append(env.payload_states.detach().numpy().copy())
         if hasattr(env, 'scale_states') and env.scale_states is not None:
             scale_trajectories.append(env.scale_states.detach().numpy().copy())
+        
+        # Save edge index
+        try:
+            curr_graph = env._get_graph()
+            edge_trajectories.append(curr_graph.edge_index.detach().numpy().copy())
+        except Exception:
+            edge_trajectories.append(np.empty((2, 0)))
+
         if info["done"]:
             break
 
@@ -280,7 +297,7 @@ def run_simulation(
 
     cable_length = env.params.get("cable_length", 1.0) if hasattr(env, 'params') else 1.0
     return (trajectories, goals, obstacle_info, area_size, comm_radius, mode,
-            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj)
+            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_trajectories)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -291,8 +308,10 @@ def create_video(
     trajectories, goals, obstacle_info, area_size,
     save_path="trajectories.mp4", fps=30, skip=1,
     mode="lqr", comm_radius=1.5,
+    mode="lqr", comm_radius=1.5,
     is_swarm=False, R_form=0.3, r_margin=0.2,
     payload_traj=None, cable_length=1.0, scale_traj=None,
+    edge_traj=None,
 ):
     n_agents = trajectories.shape[1]
     total_frames = trajectories.shape[0]
@@ -431,11 +450,17 @@ def create_video(
     ax.legend(handles=handles, loc="upper right", fontsize=9,
               framealpha=0.9, edgecolor="#dee2e6")
 
+    # Graph edges visualization
+    from matplotlib.collections import LineCollection
+    edge_lines = LineCollection([], colors='black', linewidths=0.8, alpha=0.3, zorder=2)
+    ax.add_collection(edge_lines)
+
     def init():
         for line in trail_lines:
             line.set_data([], [])
         for dot in current_dots:
             dot.set_data([], [])
+        edge_lines.set_segments([])
         return []
 
     def update(frame_idx):
@@ -479,6 +504,38 @@ def create_video(
                 py_pay = cy + cable_length * np.sin(gy)
                 payload_dots[i].set_data([px_pay], [py_pay])
                 payload_cables[i].set_data([cx, px_pay], [cy, py_pay])
+
+        # Draw actual PyTorch Geometric GNN graph edges!
+        segments = []
+        if edge_traj is not None and sim_step < len(edge_traj):
+            edges = edge_traj[sim_step] # shape (2, num_edges)
+            # The edge indices might refer to 0..N-1 (agents), N..N+M-1 (obs), N+M..2N+M-1 (goals)
+            # We need to map these node IDs back to coordinates.
+            # In node builder: agents (0:N), obs (N:N+M), goals (N+M:2N+M)
+            n_obs_nodes = len(obstacle_info)
+            for e_idx in range(edges.shape[1]):
+                src = int(edges[0, e_idx])
+                dst = int(edges[1, e_idx])
+                
+                def get_pos(node_id):
+                    if node_id < n_agents:
+                        return (trajectories[sim_step, node_id, 0], trajectories[sim_step, node_id, 1])
+                    elif node_id < n_agents + n_obs_nodes:
+                        obs_idx = node_id - n_agents
+                        return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
+                    else:
+                        goal_idx = node_id - n_agents - n_obs_nodes
+                        # Safeguard in case graph builders change
+                        if goal_idx < len(goals):
+                            return (goals[goal_idx][0], goals[goal_idx][1])
+                        return None
+
+                p1 = get_pos(src)
+                p2 = get_pos(dst)
+                if p1 and p2:
+                    segments.append([p1, p2])
+                
+        edge_lines.set_segments(segments)
 
         # Step text with scale info
         scale_info = ""
@@ -667,6 +724,11 @@ def main():
     args = parser.parse_args()
 
     print("Running simulation...")
+    # The following arguments are not defined in the provided snippet,
+    # assuming they are defined elsewhere in the actual file or are placeholders.
+    # For the purpose of this edit, we'll use dummy values or assume they exist.
+    # policy_net, cfg, is_swarm are not defined in the provided context.
+    # We will use the original run_simulation call structure and add edge_traj.
     result = run_simulation(
         num_agents=args.num_agents, area_size=args.area_size,
         max_steps=args.max_steps, dt=args.dt, n_obs=args.n_obs,
@@ -674,22 +736,31 @@ def main():
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,
-     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj) = result
+     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj) = result
     entity = "swarms" if is_swarm else "agents"
     print(f"  Recorded {trajectories.shape[0]} frames for "
           f"{trajectories.shape[1]} {entity}.  Mode: {mode}")
 
+    # The 'common' dict is no longer used for create_video, but might be for plot_trajectories
     common = dict(
         trajectories=trajectories, goals=goals, obstacle_info=obstacle_info,
         area_size=area, mode=mode, comm_radius=comm_r,
         is_swarm=is_swarm, R_form=R_form, r_margin=r_margin,
         payload_traj=payload_traj, cable_length=cable_length,
         scale_traj=scale_traj,
+        edge_traj=edge_traj, # Add edge_traj to common for plot_trajectories if needed
     )
 
     if args.save.endswith(".mp4"):
         print("Creating video...")
-        create_video(**common, save_path=args.save, fps=args.fps, skip=args.skip)
+        create_video(
+            trajectories, goals, obstacle_info, area,
+            save_path=args.save, fps=args.fps, skip=args.skip,
+            mode=mode, comm_radius=comm_r,
+            is_swarm=is_swarm, R_form=R_form, r_margin=r_margin,
+            payload_traj=payload_traj, cable_length=cable_length, scale_traj=scale_traj,
+            edge_traj=edge_traj
+        )
     else:
         print("Plotting static image...")
         plot_trajectories(**common, save_path=args.save)
