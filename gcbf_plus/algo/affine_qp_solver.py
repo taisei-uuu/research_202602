@@ -239,7 +239,8 @@ def solve_affine_qp(
                 A_cy = 2.0 * dp[:, 1] / mass
                 A_as = -2.0 * safe_dist * R_form
 
-                rhs = h_dot_drift + alpha_obs * h_agent
+                # Reciprocal Collision Avoidance: each agent takes 50% responsibility
+                rhs = (h_dot_drift + alpha_obs * h_agent) * 0.5
                 A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
 
                 c_val = (A_vec * X).sum(dim=-1) + rhs
