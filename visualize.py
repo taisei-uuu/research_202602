@@ -308,7 +308,6 @@ def create_video(
     trajectories, goals, obstacle_info, area_size,
     save_path="trajectories.mp4", fps=30, skip=1,
     mode="lqr", comm_radius=1.5,
-    mode="lqr", comm_radius=1.5,
     is_swarm=False, R_form=0.3, r_margin=0.2,
     payload_traj=None, cable_length=1.0, scale_traj=None,
     edge_traj=None,
