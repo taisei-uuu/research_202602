@@ -167,7 +167,7 @@ def run_simulation(
     K_v_cfg = cfg.get("K_v", 2.0) if cfg else 2.0
     K_s_cfg = cfg.get("K_s", 2.0) if cfg else 2.0
 
-    for _ in range(max_steps):
+    for step_idx in range(max_steps):
         if policy_net is not None:
             with torch.no_grad():
                 graph = env._get_graph()
@@ -273,7 +273,7 @@ def run_simulation(
         else:
             u = env.nominal_controller()
 
-        _, info = env.step(u)
+        next_obs, info = env.step(u)
         trajectories.append(env.agent_states.detach().numpy().copy())
         if hasattr(env, 'payload_states') and env.payload_states is not None:
             payload_trajectories.append(env.payload_states.detach().numpy().copy())
@@ -288,9 +288,8 @@ def run_simulation(
             edge_trajectories.append(edges.detach().numpy().copy())
         else:
             edge_trajectories.append(np.empty((2, 0)))
-        
-        if _ == 0 or _ == max_steps - 1 or (_ % 100 == 0):
-            print(f"  [DEBUG] Sim step {_}: Extracted {edge_trajectories[-1].shape[1]} edges")
+        if step_idx == 0 or step_idx == max_steps - 1 or (step_idx % 100 == 0):
+            print(f"  [DEBUG] Sim step {step_idx}: Extracted {edge_trajectories[-1].shape[1]} edges")
 
         if info["done"]:
             break
