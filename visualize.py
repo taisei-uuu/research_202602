@@ -513,9 +513,13 @@ def create_video(
             # In swarm_graph.py node builder for vectorized env:
             # agents (0..n-1), goals (n..2n-1), obstacles (2n..2n+n_obs-1)
             n_obs_nodes = len(obstacle_info)
+            # Total nodes per batch (N_per) = agents (N) + goals (N) + obstacles (M)
+            n_per = 2 * n_agents + n_obs_nodes
+            
             for e_idx in range(edges.shape[1]):
-                src = int(edges[0, e_idx])
-                dst = int(edges[1, e_idx])
+                # Use modulo to get the local node ID within the 1-batch graph
+                src = int(edges[0, e_idx]) % n_per
+                dst = int(edges[1, e_idx]) % n_per
                 
                 def get_pos(node_id):
                     # Agent states (0 to n-1)
