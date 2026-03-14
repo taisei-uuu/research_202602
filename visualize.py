@@ -510,23 +510,28 @@ def create_video(
             edges = edge_traj[sim_step] # shape (2, num_edges)
             # The edge indices might refer to 0..N-1 (agents), N..N+M-1 (obs), N+M..2N+M-1 (goals)
             # We need to map these node IDs back to coordinates.
-            # In node builder: agents (0:N), obs (N:N+M), goals (N+M:2N+M)
+            # In swarm_graph.py node builder for vectorized env:
+            # agents (0..n-1), goals (n..2n-1), obstacles (2n..2n+n_obs-1)
             n_obs_nodes = len(obstacle_info)
             for e_idx in range(edges.shape[1]):
                 src = int(edges[0, e_idx])
                 dst = int(edges[1, e_idx])
                 
                 def get_pos(node_id):
+                    # Agent states (0 to n-1)
                     if node_id < n_agents:
                         return (trajectories[sim_step, node_id, 0], trajectories[sim_step, node_id, 1])
-                    elif node_id < n_agents + n_obs_nodes:
-                        obs_idx = node_id - n_agents
-                        return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
-                    else:
-                        goal_idx = node_id - n_agents - n_obs_nodes
-                        # Safeguard in case graph builders change
+                    # Goal states (n to 2n-1)
+                    elif node_id < 2 * n_agents:
+                        goal_idx = node_id - n_agents
                         if goal_idx < len(goals):
                             return (goals[goal_idx][0], goals[goal_idx][1])
+                        return None
+                    # Obstacle states (2n to 2n + n_obs - 1)
+                    else:
+                        obs_idx = node_id - 2 * n_agents
+                        if obs_idx < n_obs_nodes:
+                            return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
                         return None
 
                 p1 = get_pos(src)
