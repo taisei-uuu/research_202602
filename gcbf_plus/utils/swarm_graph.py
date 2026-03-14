@@ -30,27 +30,20 @@ def _wrap_angle(a: torch.Tensor) -> torch.Tensor:
 def build_swarm_graph_from_states(
     agent_states: torch.Tensor,
     goal_states: torch.Tensor,
-    obstacle_positions: Optional[torch.Tensor],
+    obstacle_positions: Optional[Union[torch.Tensor, List[torch.Tensor]]],
     comm_radius: Union[float, torch.Tensor],
     node_dim: int = 3,
     edge_dim: int = 4,
 ) -> GraphsTuple:
     """
-    Build a GraphsTuple for swarm agents using CoM-based bounding circles.
+    Build a GraphsTuple for swarm agents using LiDAR-based hit points.
 
     Parameters
     ----------
-    agent_states : (n_agents, 4)  — [px, py, vx, vy]
+    agent_states : (n_agents, 4)
     goal_states  : (n_agents, 4)
-    obstacle_positions : (n_obs, 4) or None
+    obstacle_positions : List[torch.Tensor] (per-agent hits) or (n_obs, 4) tensor
     comm_radius : float or (n_agents,) tensor
-        If tensor, each agent has its own sensing radius.
-    node_dim : int (default 3)
-    edge_dim : int (default 4)
-
-    Returns
-    -------
-    GraphsTuple with 4D edge features.
     """
     n_agents = agent_states.shape[0]
     device = agent_states.device
@@ -62,12 +55,20 @@ def build_swarm_graph_from_states(
         torch.ones(n_agents, dtype=torch.long, device=device),
     ]
 
-    n_obs = 0
-    if obstacle_positions is not None and obstacle_positions.shape[0] > 0:
-        n_obs = obstacle_positions.shape[0]
+    # Handle per-agent obstacle hit points (LiDAR style)
+    if isinstance(obstacle_positions, list):
+        # Flatten all hit points into the global node list
+        for hits in obstacle_positions:
+            if hits.shape[0] > 0:
+                all_states.append(hits)
+                node_types.append(
+                    torch.full((hits.shape[0],), 2, dtype=torch.long, device=device)
+                )
+    elif obstacle_positions is not None and obstacle_positions.shape[0] > 0:
+        # Backward compatibility for global center nodes
         all_states.append(obstacle_positions)
         node_types.append(
-            torch.full((n_obs,), 2, dtype=torch.long, device=device)
+            torch.full((obstacle_positions.shape[0],), 2, dtype=torch.long, device=device)
         )
 
     all_states_cat = torch.cat(all_states, dim=0)   # (N_total, 4)
@@ -79,30 +80,43 @@ def build_swarm_graph_from_states(
     for t in range(node_dim):
         node_feats[node_type_vec == t, t] = 1.0
 
-    # ---- All-to-agent edges (CoM distance) ----
-    agent_pos = agent_states[:, :2]                        # (n, 2)
-    all_pos = all_states_cat[:, :2]                        # (N, 2)
-    diff = all_pos.unsqueeze(1) - agent_pos.unsqueeze(0)   # (N, n, 2)
-    dist = torch.norm(diff, dim=-1)                        # (N, n)
+    # ---- Build Mask Matrix (N_total, n_agents) ----
+    # mask[i, j] = True means there is a sender-edge from node i to agent j
+    mask = torch.zeros((n_total, n_agents), dtype=torch.bool, device=device)
 
-    # Dynamic comm_radius: per-receiver agent threshold
+    # 1. Agent-Agent edges (CoM distance)
+    agent_pos = agent_states[:, :2]                        # (n, 2)
+    # distance between first n_agents and all n_agents
+    dist_aa = torch.norm(agent_pos.unsqueeze(1) - agent_pos.unsqueeze(0), dim=-1) # (n, n)
+    
     if isinstance(comm_radius, torch.Tensor):
-        # comm_radius: (n,) → threshold per receiver (column)
         cr = comm_radius.unsqueeze(0)  # (1, n)
     else:
-        cr = comm_radius  # scalar broadcast
-
-    mask = dist <= cr
-    # Remove self-loops (agent→itself)
+        cr = comm_radius
+    
+    aa_mask = dist_aa <= cr
     for i in range(n_agents):
-        mask[i, i] = False
+        aa_mask[i, i] = False # No self-loops
+    mask[:n_agents, :] = aa_mask
 
-    # ---- NEW: Global Goal Visibility ----
-    # The first `n_agents` nodes in all_states_cat AFTER the initial `n_agents` nodes are the goals.
-    # Indices [n_agents : 2*n_agents] correspond to goals 0 to n_agents-1.
-    # We want goal_i (index n_agents + i) to be visible to agent_i (receiver column i).
+    # 2. Agent-Goal Visibility (Identity)
     for i in range(n_agents):
         mask[n_agents + i, i] = True
+
+    # 3. Agent-Obstacle (LiDAR Hits)
+    if isinstance(obstacle_positions, list):
+        current_idx = 2 * n_agents
+        for i in range(n_agents):
+            n_hits = obstacle_positions[i].shape[0]
+            if n_hits > 0:
+                # Agent i only sees its own hit points
+                mask[current_idx : current_idx + n_hits, i] = True
+                current_idx += n_hits
+    elif obstacle_positions is not None and obstacle_positions.shape[0] > 0:
+        # Global distance-based fallback
+        obs_pos = all_states_cat[2 * n_agents :, :2]
+        dist_oa = torch.norm(obs_pos.unsqueeze(1) - agent_pos.unsqueeze(0), dim=-1)
+        mask[2 * n_agents :, :] = (dist_oa <= cr)
 
     s_idx, r_idx = torch.where(mask)
 

@@ -33,6 +33,35 @@ class Obstacle:
     center: torch.Tensor   # (2,)
     half_size: torch.Tensor  # (2,)
 
+    def ray_intersection(self, start: torch.Tensor, end: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Compute the intersection of a ray (start -> end) with this AABB.
+        Returns the closest hit point (tensor(2,)) or None if no intersection in [0, 1].
+        """
+        # Direction vector
+        d = end - start
+        
+        # AABB bounds
+        p_min = self.center - self.half_size
+        p_max = self.center + self.half_size
+        
+        # Avoid division by zero
+        eps = 1e-8
+        t_low = (p_min - start) / (d + eps)
+        t_high = (p_max - start) / (d + eps)
+        
+        t1 = torch.min(t_low, t_high)
+        t2 = torch.max(t_low, t_high)
+        
+        t_near = torch.max(t1)
+        t_far = torch.min(t2)
+        
+        # Intersection exists if t_near <= t_far and it is within the line segment [0, 1]
+        if t_near <= t_far and t_far >= 0:
+            if 0 <= t_near <= 1:
+                return start + t_near * d
+        return None
+
 
 # ── LQR helper ───────────────────────────────────────────────────────
 
@@ -180,10 +209,12 @@ class SwarmIntegrator:
         obs_states = []
         for obs in self._obstacles:
             s = torch.zeros(4)
-            s[0] = obs.center[0]
-            s[1] = obs.center[1]
+            s[:2] = obs.center
             obs_states.append(s)
         self._obstacle_states = torch.stack(obs_states) if obs_states else None
+        
+        # LiDAR cache
+        self._last_lidar_hits: List[torch.Tensor] = [] # List of (N_hits, 4) per agent
 
         # Agent / goal positions (collision-free)
         start_pos = self._sample_free_positions(rng, n, margin)
@@ -378,15 +409,73 @@ class SwarmIntegrator:
 
         return agent_collision | obs_collision
 
+    def get_lidar_points(self, num_beams: int = 32) -> List[torch.Tensor]:
+        """
+        Generate LiDAR hit points for each agent.
+        Returns a list of length num_agents, where each element is a (M_i, 4) tensor
+        of [px, py, vx, vy] hit points (velocity is always 0 for obstacles).
+        """
+        n = self.num_agents
+        s_vals = self.scale_states[:, 0]
+        sensing_radii = self.comm_radius * s_vals
+        agent_pos = self.agent_states[:, :2]
+        
+        all_agent_hits = []
+        
+        # Angles for radial beams
+        angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=agent_pos.device)[:-1]
+        directions = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1) # (N_beams, 2)
+        
+        for i in range(n):
+            start = agent_pos[i]
+            radius = sensing_radii[i]
+            agent_hits = []
+            
+            # Ends of the beams
+            beam_ends = start + radius * directions # (N_beams, 2)
+            
+            for b_idx in range(num_beams):
+                end = beam_ends[b_idx]
+                min_t = 1.1 # initialized to > 1
+                hit_pos = None
+                
+                for obs in self._obstacles:
+                    # Intersection check with rectangle boundary
+                    p_hit = obs.ray_intersection(start, end)
+                    if p_hit is not None:
+                        t = torch.norm(p_hit - start) / radius
+                        if t < min_t:
+                            min_t = t
+                            hit_pos = p_hit
+                
+                if hit_pos is not None:
+                    # hit_pos is (2,)
+                    hit_state = torch.zeros(4, device=agent_pos.device)
+                    hit_state[:2] = hit_pos
+                    # vx, vy = 0
+                    agent_hits.append(hit_state)
+            
+            if agent_hits:
+                all_agent_hits.append(torch.stack(agent_hits))
+            else:
+                all_agent_hits.append(torch.zeros((0, 4), device=agent_pos.device))
+                
+        self._last_lidar_hits = all_agent_hits
+        return all_agent_hits
+
     # ── Graph builder ─────────────────────────────────────────────────
     def _get_graph(self) -> GraphsTuple:
-        # Dynamic comm_radius: comm_base * s  → (n,)
-        s = self.scale_states[:, 0]  # (n,)
+        # 1. Update LiDAR sensing
+        lidar_hits = self.get_lidar_points()
+        
+        # 2. Build graph with per-agent hit points
+        s = self.scale_states[:, 0]
         dyn_cr = self.comm_radius * s
+        
         return build_swarm_graph_from_states(
             agent_states=self.agent_states,
             goal_states=self.goal_states,
-            obstacle_positions=self._obstacle_states,
+            obstacle_positions=lidar_hits, # Now passing List[Tensor] instead of Tensor
             comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,

@@ -141,6 +141,7 @@ def run_simulation(
     payload_trajectories: List[np.ndarray] = []
     scale_trajectories: List[np.ndarray] = []
     edge_trajectories: List[np.ndarray] = []
+    lidar_trajectories: List[List[np.ndarray]] = []
 
     trajectories.append(env.agent_states.detach().numpy().copy())
     if hasattr(env, 'payload_states') and env.payload_states is not None:
@@ -155,6 +156,9 @@ def run_simulation(
         edge_trajectories.append(edges.detach().numpy().copy())
     else:
         edge_trajectories.append(np.empty((2, 0)))
+    
+    # Store initial LiDAR hits (via _get_graph call above)
+    lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
 
     goals = env.goal_states.detach().numpy().copy()
     obstacle_info = [(obs.center.numpy().copy(), obs.half_size.numpy().copy())
@@ -288,6 +292,9 @@ def run_simulation(
             edge_trajectories.append(edges.detach().numpy().copy())
         else:
             edge_trajectories.append(np.empty((2, 0)))
+        
+        # Save LiDAR hits
+        lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
         if step_idx == 0 or step_idx == max_steps - 1 or (step_idx % 100 == 0):
             print(f"  [DEBUG] Sim step {step_idx}: Extracted {edge_trajectories[-1].shape[1]} edges")
 
@@ -302,7 +309,7 @@ def run_simulation(
 
     cable_length = env.params.get("cable_length", 1.0) if hasattr(env, 'params') else 1.0
     return (trajectories, goals, obstacle_info, area_size, comm_radius, mode,
-            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_trajectories)
+            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_trajectories, lidar_trajectories)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -315,7 +322,7 @@ def create_video(
     mode="lqr", comm_radius=1.5,
     is_swarm=False, R_form=0.3, r_margin=0.2,
     payload_traj=None, cable_length=1.0, scale_traj=None,
-    edge_traj=None,
+    edge_traj=None, lidar_traj=None,
 ):
     n_agents = trajectories.shape[1]
     total_frames = trajectories.shape[0]
@@ -522,8 +529,9 @@ def create_video(
             # In swarm_graph.py `build_swarm_graph_from_states` (used by DoubleIntegrator):
             # agents (0..n-1), obstacles (n..n+n_obs-1), goals (n+n_obs..2n+n_obs-1)
             n_obs_nodes = len(obstacle_info)
-            # Total nodes = agents (N) + obstacles (M) + goals (N)
-            n_per = 2 * n_agents + n_obs_nodes
+            # Total nodes = agents (N) + goals (N) + total lidar hits
+            n_lidar_hits = sum(h.shape[0] for h in lidar_traj[sim_step]) if lidar_traj else 0
+            n_per = 2 * n_agents + n_lidar_hits
             
             for e_idx in range(edges.shape[1]):
                 # Use modulo just in case, though unbatched shouldn't strictly need it
@@ -531,11 +539,6 @@ def create_video(
                 dst = int(edges[1, e_idx]) % n_per
                 
                 def get_pos(node_id):
-                    # Node indices from swarm_graph.py / graph.py: 
-                    # 0..N-1: Agents
-                    # N..2N-1: Goals
-                    # 2N..2N+M-1: Obstacles (where M is n_obs_nodes)
-                    
                     # Agent states (0 to n-1)
                     if node_id < n_agents:
                         return (trajectories[sim_step, node_id, 0], trajectories[sim_step, node_id, 1])
@@ -547,11 +550,25 @@ def create_video(
                             return (goals[goal_idx][0], goals[goal_idx][1])
                         return None
                     
-                    # Obstacle states (2n to 2n + n_obs - 1)
+                    # Obstacle / Hit Point states (2n onward)
                     else:
-                        obs_idx = node_id - 2 * n_agents
-                        if obs_idx < n_obs_nodes:
-                            return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
+                        hit_idx = node_id - 2 * n_agents
+                        if lidar_traj is not None and sim_step < len(lidar_traj):
+                            # We need to find which agent this hit point belongs to
+                            current_total = 0
+                            for a_idx in range(n_agents):
+                                hits = lidar_traj[sim_step][a_idx]
+                                n_h = hits.shape[0]
+                                if current_total <= hit_idx < current_total + n_h:
+                                    local_idx = hit_idx - current_total
+                                    return (hits[local_idx, 0], hits[local_idx, 1])
+                                current_total += n_h
+                                
+                        # Fallback for old global centers (if any)
+                        if n_obs_nodes > 0:
+                            obs_idx = node_id - 2 * n_agents
+                            if obs_idx < n_obs_nodes:
+                                return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
                         return None
 
                 p1 = get_pos(src)
@@ -768,7 +785,7 @@ def main():
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,
-     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj) = result
+     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj, lidar_traj) = result
     entity = "swarms" if is_swarm else "agents"
     print(f"  Recorded {trajectories.shape[0]} frames for "
           f"{trajectories.shape[1]} {entity}.  Mode: {mode}")
@@ -791,7 +808,7 @@ def main():
             mode=mode, comm_radius=comm_r,
             is_swarm=is_swarm, R_form=R_form, r_margin=r_margin,
             payload_traj=payload_traj, cable_length=cable_length, scale_traj=scale_traj,
-            edge_traj=edge_traj
+            edge_traj=edge_traj, lidar_traj=lidar_traj
         )
     else:
         print("Plotting static image...")
