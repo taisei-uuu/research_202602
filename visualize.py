@@ -149,10 +149,11 @@ def run_simulation(
         scale_trajectories.append(env.scale_states.detach().numpy().copy())
     
     # Store initial graph edges
-    try:
-        init_graph = env._get_graph()
-        edge_trajectories.append(init_graph.edge_index.detach().numpy().copy())
-    except Exception:
+    init_graph = env._get_graph()
+    if hasattr(init_graph, 'senders') and init_graph.senders is not None:
+        edges = torch.stack([init_graph.senders, init_graph.receivers], dim=0)
+        edge_trajectories.append(edges.detach().numpy().copy())
+    else:
         edge_trajectories.append(np.empty((2, 0)))
 
     goals = env.goal_states.detach().numpy().copy()
@@ -280,11 +281,16 @@ def run_simulation(
             scale_trajectories.append(env.scale_states.detach().numpy().copy())
         
         # Save edge index
-        try:
-            curr_graph = env._get_graph()
-            edge_trajectories.append(curr_graph.edge_index.detach().numpy().copy())
-        except Exception:
+        curr_graph = env._get_graph()
+        if hasattr(curr_graph, 'senders') and curr_graph.senders is not None:
+            # FIX: Use curr_graph instead of init_graph
+            edges = torch.stack([curr_graph.senders, curr_graph.receivers], dim=0)
+            edge_trajectories.append(edges.detach().numpy().copy())
+        else:
             edge_trajectories.append(np.empty((2, 0)))
+        
+        if _ == 0 or _ == max_steps - 1 or (_ % 100 == 0):
+            print(f"  [DEBUG] Sim step {_}: Extracted {edge_trajectories[-1].shape[1]} edges")
 
         if info["done"]:
             break
@@ -451,8 +457,11 @@ def create_video(
 
     # Graph edges visualization
     from matplotlib.collections import LineCollection
-    edge_lines = LineCollection([], colors='black', linewidths=0.8, alpha=0.3, zorder=2)
+    # Increase zorder to 15 to ensure visibility, change color to something more distinct
+    edge_lines = LineCollection([], colors='#FF5722', linewidths=1.2, alpha=0.5, zorder=15)
     ax.add_collection(edge_lines)
+    
+    print(f"  [DEBUG] Creating video with {len(edge_traj) if edge_traj else 0} edge trajectory frames")
 
     def init():
         for line in trail_lines:
@@ -522,26 +531,38 @@ def create_video(
                 dst = int(edges[1, e_idx]) % n_per
                 
                 def get_pos(node_id):
+                    # Node indices from swarm_graph.py / graph.py: 
+                    # 0..N-1: Agents
+                    # N..2N-1: Goals
+                    # 2N..2N+M-1: Obstacles (where M is n_obs_nodes)
+                    
                     # Agent states (0 to n-1)
                     if node_id < n_agents:
                         return (trajectories[sim_step, node_id, 0], trajectories[sim_step, node_id, 1])
-                    # Obstacle states (n to n + n_obs - 1)
-                    elif node_id < n_agents + n_obs_nodes:
-                        obs_idx = node_id - n_agents
-                        if obs_idx < n_obs_nodes:
-                            return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
-                        return None
-                    # Goal states (n + n_obs to 2n + n_obs - 1)
-                    else:
-                        goal_idx = node_id - n_agents - n_obs_nodes
+                    
+                    # Goal states (n to 2n - 1)
+                    elif node_id < 2 * n_agents:
+                        goal_idx = node_id - n_agents
                         if goal_idx < len(goals):
                             return (goals[goal_idx][0], goals[goal_idx][1])
+                        return None
+                    
+                    # Obstacle states (2n to 2n + n_obs - 1)
+                    else:
+                        obs_idx = node_id - 2 * n_agents
+                        if obs_idx < n_obs_nodes:
+                            return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
                         return None
 
                 p1 = get_pos(src)
                 p2 = get_pos(dst)
-                if p1 and p2:
+                if p1 is not None and p2 is not None:
                     segments.append([p1, p2])
+            
+            if sim_step == 0:
+                print(f"  [DEBUG] Animation frame 0: {len(segments)} valid segments to draw")
+                if len(segments) > 0:
+                    print(f"  [DEBUG] Node mapping check (Edge 0): src={int(edges[0,0])}->{p1}, dst={int(edges[1,0])}->{p2}")
                 
         edge_lines.set_segments(segments)
 
