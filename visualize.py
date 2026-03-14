@@ -456,8 +456,8 @@ def create_video(
 
     # Graph edges visualization
     from matplotlib.collections import LineCollection
-    # Increase zorder to 15 to ensure visibility, change color to something more distinct
-    edge_lines = LineCollection([], colors='#FF5722', linewidths=1.2, alpha=0.5, zorder=15)
+    # Increase zorder to 15 to ensure visibility, set colors dynamically in update loop
+    edge_lines = LineCollection([], linewidths=1.2, alpha=0.5, zorder=15)
     ax.add_collection(edge_lines)
     
     print(f"  [DEBUG] Creating video with {len(edge_traj) if edge_traj else 0} edge trajectory frames")
@@ -514,6 +514,7 @@ def create_video(
 
         # Draw actual PyTorch Geometric GNN graph edges!
         segments = []
+        edge_colors = []
         if edge_traj is not None and sim_step < len(edge_traj):
             edges = edge_traj[sim_step] # shape (2, num_edges)
             # The edge indices might refer to 0..N-1 (agents), N..N+M-1 (obs), N+M..2N+M-1 (goals)
@@ -557,13 +558,16 @@ def create_video(
                 p2 = get_pos(dst)
                 if p1 is not None and p2 is not None:
                     segments.append([p1, p2])
+                    # Color based on receiver's color
+                    edge_colors.append(colors[dst])
             
             if sim_step == 0:
                 print(f"  [DEBUG] Animation frame 0: {len(segments)} valid segments to draw")
                 if len(segments) > 0:
-                    print(f"  [DEBUG] Node mapping check (Edge 0): src={int(edges[0,0])}->{p1}, dst={int(edges[1,0])}->{p2}")
+                    print(f"  [DEBUG] Node mapping check (Edge 0): src={int(edges[0,0])}->{p1}, dst={int(edges[1,0])}->{p2}, color={edge_colors[0]}")
                 
         edge_lines.set_segments(segments)
+        edge_lines.set_edgecolor(edge_colors)
 
         # Step text with scale info
         scale_info = ""
