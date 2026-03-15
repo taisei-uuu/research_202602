@@ -17,8 +17,8 @@ subject to:
        a_s ≥ -α₁·ṡ - α₂·(s - s_min)
        a_s ≤ -α₁·ṡ + α₂·(s_max - s)
 
-Constraint order: HOCBF → Obstacle → Scale (last applied = highest priority).
-Uses Dykstra-style alternating projection (3-5 iterations) for convergence.
+# Constraint order: HOCBF → Scale → Obstacle / Agent-Agent (last applied = highest priority).
+# Uses Dykstra-style alternating projection (3-5 iterations) for convergence.
 
 After QP: box clamp on a_cx, a_cy (u_max) applied.
 """
@@ -170,7 +170,19 @@ def solve_affine_qp(
                 X[:, 1] = torch.where(violate_y, uy_new, uy)
 
         # ------------------------------------------------------------
-        # 2. Obstacle CBF constraints (HARD) — per obstacle
+        # 2. Scale CBF constraints
+        #    — medium priority, applied before collisions
+        # ------------------------------------------------------------
+        if has_scale:
+            lower_bound = -alpha_scale * s_dot - alpha_scale * (s - s_min)
+            X[:, 2] = torch.max(X[:, 2], lower_bound)
+
+            upper_bound = -alpha_scale * s_dot + alpha_scale * (s_max - s)
+            X[:, 2] = torch.min(X[:, 2], upper_bound)
+
+        # ------------------------------------------------------------
+        # 3. Obstacle CBF constraints (HARD) — per obstacle
+        #    — high priority, applied near-last
         # ------------------------------------------------------------
         if has_obs:
             for j in range(n_obs):
@@ -208,7 +220,8 @@ def solve_affine_qp(
                     )
 
         # ------------------------------------------------------------
-        # 2.5 Agent-Agent CBF constraints (HARD)
+        # 4. Agent-Agent CBF constraints (HARD)
+        #    — highest priority, applied last
         # ------------------------------------------------------------
         has_other_agents = (other_agent_pos is not None and other_agent_vel is not None
                             and other_agent_s is not None and other_agent_s_dot is not None
@@ -255,19 +268,8 @@ def solve_affine_qp(
                         X,
                     )
 
-        # ------------------------------------------------------------
-        # 3. Scale CBF constraints (ABSOLUTE HARD) — 1D clamp
-        #    — highest priority, applied last
-        # ------------------------------------------------------------
-        if has_scale:
-            lower_bound = -alpha_scale * s_dot - alpha_scale * (s - s_min)
-            X[:, 2] = torch.max(X[:, 2], lower_bound)
-
-            upper_bound = -alpha_scale * s_dot + alpha_scale * (s_max - s)
-            X[:, 2] = torch.min(X[:, 2], upper_bound)
-
     # ================================================================
-    # 4. Box clamp on translation (u_max)
+    # 5. Box clamp on translation (u_max)
     # ================================================================
     if u_max is not None:
         X[:, :2] = torch.clamp(X[:, :2], -u_max, u_max)
