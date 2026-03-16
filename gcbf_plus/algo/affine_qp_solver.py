@@ -11,8 +11,8 @@ subject to:
     1. HOCBF  payload swing (SOFT, a_cx/a_cy only):
        C_xi·a_cx ≥ D_xi - δ_xi
        C_yi·a_cy ≥ D_yi - δ_yi
-    2. Obstacle CBF (HARD):
-       A·X + (ḣ_drift + α·h) ≥ 0
+    2. Obstacle CBF (HARD - 2nd Order HOCBF):
+       A·X + (ḣ_drift + (α₁+α₂)ḣ + α₁α₂h) ≥ 0
     3. Scale  CBF (ABSOLUTE HARD):
        a_s ≥ -α₁·ṡ - α₂·(s - s_min)
        a_s ≤ -α₁·ṡ + α₂·(s_max - s)
@@ -181,31 +181,38 @@ def solve_affine_qp(
             X[:, 2] = torch.min(X[:, 2], upper_bound)
 
         # ------------------------------------------------------------
-        # 3. Obstacle CBF constraints (HARD) — per obstacle
+        # 3. Obstacle CBF constraints (HARD - 2nd Order HOCBF)
         #    — high priority, applied near-last
         # ------------------------------------------------------------
         if has_obs:
+            a1, a2 = hocbf_alpha1, hocbf_alpha2
             for j in range(n_obs):
                 oc = obs_centers[:, j, :]     # (N, 2)
                 ohs = obs_half_sizes[:, j, :]  # (N, 2)
 
                 R_obs = torch.max(ohs, dim=-1).values
                 r_sw = R_form * s + r_margin
+                safe_dist = r_sw + R_obs
 
                 dp = agent_pos - oc
                 dist_sq = (dp * dp).sum(dim=-1)
-                safe_dist = r_sw + R_obs
                 h_obs = dist_sq - safe_dist ** 2
 
-                h_dot_drift = (2.0 * (dp * agent_vel).sum(dim=-1)
-                               - 2.0 * safe_dist * R_form * s_dot)
+                # 1st derivative: h_dot
+                r_dot = R_form * s_dot
+                h_dot = 2.0 * (dp * agent_vel).sum(dim=-1) - 2.0 * safe_dist * r_dot
+
+                # 2nd derivative drift term (part of h_ddot not including control input X)
+                # h_ddot = 2|v|^2 + 2*dp*a - 2*r_dot^2 - 2*r*r_ddot
+                h_ddot_drift = 2.0 * agent_vel.pow(2).sum(dim=-1) - 2.0 * r_dot.pow(2)
 
                 A_cx = 2.0 * dp[:, 0] / mass
                 A_cy = 2.0 * dp[:, 1] / mass
                 A_as = -2.0 * safe_dist * R_form
-
-                rhs = h_dot_drift + alpha_obs * h_obs
                 A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
+
+                # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_obs >= 0
+                rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_obs
 
                 c_val = (A_vec * X).sum(dim=-1) + rhs
                 violated = c_val < 0
@@ -245,16 +252,22 @@ def solve_affine_qp(
                 safe_dist = r_sw + r_other
                 h_agent = dist_sq - safe_dist ** 2
 
-                h_dot_drift = (2.0 * (dp * dv).sum(dim=-1)
-                               - 2.0 * safe_dist * R_form * (s_dot + o_s_dot))
+                # 1st derivative: h_dot
+                r_dot_total = R_form * (s_dot + o_s_dot)
+                h_dot = 2.0 * (dp * dv).sum(dim=-1) - 2.0 * safe_dist * r_dot_total
+
+                # 2nd derivative drift term (part of h_ddot without relative acceleration)
+                h_ddot_drift = 2.0 * dv.pow(2).sum(dim=-1) - 2.0 * r_dot_total.pow(2)
 
                 A_cx = 2.0 * dp[:, 0] / mass
                 A_cy = 2.0 * dp[:, 1] / mass
                 A_as = -2.0 * safe_dist * R_form
-
-                # Reciprocal Collision Avoidance: each agent takes 50% responsibility
-                rhs = (h_dot_drift + alpha_obs * h_agent) * 0.5
                 A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
+
+                # Reciprocal HOCBF: each agent takes 50% responsibility
+                # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_agent >= 0
+                a1, a2 = hocbf_alpha1, hocbf_alpha2
+                rhs = (h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_agent) * 0.5
 
                 c_val = (A_vec * X).sum(dim=-1) + rhs
                 violated = c_val < 0
