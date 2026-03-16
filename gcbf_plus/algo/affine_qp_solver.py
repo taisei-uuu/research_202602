@@ -103,29 +103,39 @@ def solve_affine_qp(
         a1 = hocbf_alpha1
         a2 = hocbf_alpha2
 
-        # Dynamic γ_max(s)
-        t_scale = ((s - s_min) / (s_max - s_min + 1e-8)).clamp(0.0, 1.0)
-        gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_scale
+        # -----------------------------------------------------------------
+        # Dynamic γ_max(s) based on physical swarm radius:
+        # γ_max(s) = asin(R_form * s / L)
+        # -----------------------------------------------------------------
+        ratio = (R_form * s) / l
+        clamped_ratio = torch.clamp(ratio, 0.0, 0.95)
+        gamma_dyn = torch.asin(clamped_ratio)
 
-        # X-axis HOCBF coefficients
+        # X-axis HOCBF coefficients (Translation only)
         h1x = gamma_dyn**2 - gx**2
         h1dx = -2 * gx * gx_dot
         h2x = h1dx + a1 * h1x
+        
         Cx = 2 * gx * torch.cos(gx) / l
         Dx = (2 * gx_dot**2
               - 2 * gx * (-(g_val / l) * torch.sin(gx) - c_damp * gx_dot)
-              + a1 * (-2 * gx * gx_dot)
+              + a1 * h1dx
               - a2 * h2x)
 
-        # Y-axis HOCBF coefficients
+        # Y-axis HOCBF coefficients (Translation only)
         h1y = gamma_dyn**2 - gy**2
         h1dy = -2 * gy * gy_dot
         h2y = h1dy + a1 * h1y
         Cy = 2 * gy * torch.cos(gy) / l
         Dy = (2 * gy_dot**2
               - 2 * gy * (-(g_val / l) * torch.sin(gy) - c_damp * gy_dot)
-              + a1 * (-2 * gy * gy_dot)
+              + a1 * h1dy
               - a2 * h2y)
+
+        # Apply projections (X used in the loop below)
+        # Note: In this vectorized version, the actual projection happens in the loop.
+        # However, the payload constraint now couples [a_cx, a_cy, a_s].
+        # Since X is (N, 3), we need to handle this 3D constraint.
 
     # Pre-compute obstacle CBF data (constant across iterations)
     has_obs = (obs_centers is not None and obs_half_sizes is not None
@@ -154,24 +164,18 @@ def solve_affine_qp(
             eps_c = 1e-6
 
             # X-axis: project a_cx
-            ux = X[:, 0]
-            violate_x = (Cx * ux < Dx) & (Cx.abs() > eps_c)
+            c_val_x = Cx * X[:, 0] + Dx
+            violate_x = (c_val_x < 0) & (Cx.abs() > eps_c)
             if violate_x.any():
-                target_x = Dx / (Cx + eps_c * torch.sign(Cx))
-                violation_x = target_x - ux
-                correction_x = violation_x * slack_weight / (1.0 + slack_weight)
-                ux_new = ux + correction_x
-                X[:, 0] = torch.where(violate_x, ux_new, ux)
+                lam = torch.relu(-c_val_x / (Cx**2 + 1e-8))
+                X[violate_x, 0] += lam[violate_x] * Cx[violate_x]
 
             # Y-axis: project a_cy
-            uy = X[:, 1]
-            violate_y = (Cy * uy < Dy) & (Cy.abs() > eps_c)
+            c_val_y = Cy * X[:, 1] + Dy
+            violate_y = (c_val_y < 0) & (Cy.abs() > eps_c)
             if violate_y.any():
-                target_y = Dy / (Cy + eps_c * torch.sign(Cy))
-                violation_y = target_y - uy
-                correction_y = violation_y * slack_weight / (1.0 + slack_weight)
-                uy_new = uy + correction_y
-                X[:, 1] = torch.where(violate_y, uy_new, uy)
+                lam = torch.relu(-c_val_y / (Cy**2 + 1e-8))
+                X[violate_y, 1] += lam[violate_y] * Cy[violate_y]
 
         # ------------------------------------------------------------
         # 2. Scale CBF constraints
