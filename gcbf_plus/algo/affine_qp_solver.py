@@ -131,8 +131,12 @@ def solve_affine_qp(
     has_obs = (obs_centers is not None and obs_half_sizes is not None
                and agent_pos is not None and agent_vel is not None
                and s is not None and s_dot is not None)
-    if has_obs:
-        n_obs = obs_centers.shape[1]
+    
+    # Pre-compute agent-agent CBF data
+    has_other_agents = (other_agent_pos is not None and other_agent_vel is not None
+                        and other_agent_s is not None and other_agent_s_dot is not None
+                        and agent_pos is not None and agent_vel is not None
+                        and s is not None and s_dot is not None)
 
     # Pre-compute scale CBF bounds
     has_scale = (s is not None and s_dot is not None)
@@ -157,7 +161,6 @@ def solve_affine_qp(
                 violation_x = target_x - ux
                 correction_x = violation_x * slack_weight / (1.0 + slack_weight)
                 ux_new = ux + correction_x
-                X = X.clone()
                 X[:, 0] = torch.where(violate_x, ux_new, ux)
 
             # Y-axis: project a_cy
@@ -168,7 +171,6 @@ def solve_affine_qp(
                 violation_y = target_y - uy
                 correction_y = violation_y * slack_weight / (1.0 + slack_weight)
                 uy_new = uy + correction_y
-                X = X.clone()
                 X[:, 1] = torch.where(violate_y, uy_new, uy)
 
         # ------------------------------------------------------------
@@ -176,6 +178,7 @@ def solve_affine_qp(
         #    — medium priority, applied before collisions
         # ------------------------------------------------------------
         if has_scale:
+            # s and s_dot are verified by has_scale
             lower_bound = -alpha_scale * s_dot - alpha_scale * (s - s_min)
             X[:, 2] = torch.max(X[:, 2], lower_bound)
 
@@ -187,101 +190,96 @@ def solve_affine_qp(
         #    — high priority, applied near-last
         # ------------------------------------------------------------
         if has_obs:
-            a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
-            for j in range(n_obs):
-                oc = obs_centers[:, j, :]     # (N, 2)
-                ohs = obs_half_sizes[:, j, :]  # (N, 2)
+            # Re-check for lint/type safety
+            if obs_centers is not None and obs_half_sizes is not None:
+                n_obs = obs_centers.shape[1]
+                if n_obs > 0:
+                    a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
+                    # Broadened dims for vectorization: (N, n_obs, dim)
+                    dp = agent_pos.unsqueeze(1) - obs_centers
+                    dist_sq = (dp * dp).sum(dim=-1)
 
-                R_obs = torch.max(ohs, dim=-1).values
-                r_sw = R_form * s + r_margin
-                safe_dist = r_sw + R_obs
+                    R_obs = torch.max(obs_half_sizes, dim=-1).values
+                    r_sw = R_form * s + r_margin
+                    safe_dist = r_sw.unsqueeze(1) + R_obs
+                    h_obs = dist_sq - safe_dist ** 2
 
-                dp = agent_pos - oc
-                dist_sq = (dp * dp).sum(dim=-1)
-                h_obs = dist_sq - safe_dist ** 2
+                    # 1st derivative: h_dot
+                    r_dot = R_form * s_dot
+                    h_dot = 2.0 * (dp * agent_vel.unsqueeze(1)).sum(dim=-1) - 2.0 * safe_dist * r_dot.unsqueeze(1)
 
-                # 1st derivative: h_dot
-                r_dot = R_form * s_dot
-                h_dot = 2.0 * (dp * agent_vel).sum(dim=-1) - 2.0 * safe_dist * r_dot
+                    # 2nd derivative drift term
+                    h_ddot_drift = 2.0 * agent_vel.pow(2).sum(dim=-1).unsqueeze(1) - 2.0 * r_dot.pow(2).unsqueeze(1)
 
-                # 2nd derivative drift term (part of h_ddot not including control input X)
-                # h_ddot = 2|v|^2 + 2*dp*a - 2*r_dot^2 - 2*r*r_ddot
-                h_ddot_drift = 2.0 * agent_vel.pow(2).sum(dim=-1) - 2.0 * r_dot.pow(2)
+                    A_cx = 2.0 * dp[..., 0] / mass
+                    A_cy = 2.0 * dp[..., 1] / mass
+                    A_as = -2.0 * safe_dist * R_form
+                    A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1) # (N, n_obs, 3)
 
-                A_cx = 2.0 * dp[:, 0] / mass
-                A_cy = 2.0 * dp[:, 1] / mass
-                A_as = -2.0 * safe_dist * R_form
-                A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
+                    # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_obs >= 0
+                    rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_obs
 
-                # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_obs >= 0
-                rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_obs
+                    # Calculate constraint values for all obstacles simultaneously
+                    c_vals = (A_vec * X.unsqueeze(1)).sum(dim=-1) + rhs # (N, n_obs)
+                    
+                    # Pick the most violated constraint for each agent
+                    worst_c, worst_idx = torch.min(c_vals, dim=1)
+                    violated = worst_c < 0
 
-                c_val = (A_vec * X).sum(dim=-1) + rhs
-                violated = c_val < 0
-                if violated.any():
-                    A_norm_sq = (A_vec * A_vec).sum(dim=-1)
-                    lam = torch.relu(-c_val / (A_norm_sq + 1e-8))
-                    correction = lam.unsqueeze(-1) * A_vec
-                    X = torch.where(
-                        violated.unsqueeze(-1).expand_as(X),
-                        X + correction,
-                        X,
-                    )
+                    if violated.any():
+                        row_idx = torch.arange(N, device=device)[violated]
+                        col_idx = worst_idx[violated]
+                        A_worst = A_vec[row_idx, col_idx]
+                        c_worst = worst_c[violated]
+
+                        A_norm_sq = (A_worst * A_worst).sum(dim=-1)
+                        lam = torch.relu(-c_worst / (A_norm_sq + 1e-8))
+                        X[violated] += lam.unsqueeze(-1) * A_worst
 
         # ------------------------------------------------------------
         # 4. Agent-Agent CBF constraints (HARD)
         #    — highest priority, applied last
         # ------------------------------------------------------------
-        has_other_agents = (other_agent_pos is not None and other_agent_vel is not None
-                            and other_agent_s is not None and other_agent_s_dot is not None
-                            and agent_pos is not None and agent_vel is not None
-                            and s is not None and s_dot is not None)
         if has_other_agents:
-            n_other = other_agent_pos.shape[1]
-            for j in range(n_other):
-                o_pos = other_agent_pos[:, j, :]
-                o_vel = other_agent_vel[:, j, :]
-                o_s = other_agent_s[:, j]
-                o_s_dot = other_agent_s_dot[:, j]
+            if other_agent_pos is not None and other_agent_vel is not None:
+                n_other = other_agent_pos.shape[1]
+                if n_other > 0:
+                    a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
+                    # Vectorized dims: (N, n_other, dim)
+                    dp = agent_pos.unsqueeze(1) - other_agent_pos
+                    dv = agent_vel.unsqueeze(1) - other_agent_vel
+                    dist_sq = (dp * dp).sum(dim=-1)
 
-                r_sw = R_form * s + r_margin
-                r_other = R_form * o_s + r_margin
+                    r_sw = R_form * s + r_margin
+                    r_other = R_form * other_agent_s + r_margin
+                    safe_dist = r_sw.unsqueeze(1) + r_other
+                    h_agent = dist_sq - safe_dist ** 2
 
-                dp = agent_pos - o_pos
-                dv = agent_vel - o_vel
+                    r_dot_total = R_form * (s_dot.unsqueeze(1) + other_agent_s_dot)
+                    h_dot = 2.0 * (dp * dv).sum(dim=-1) - 2.0 * safe_dist * r_dot_total
+                    h_ddot_drift = 2.0 * dv.pow(2).sum(dim=-1) - 2.0 * r_dot_total.pow(2)
 
-                dist_sq = (dp * dp).sum(dim=-1)
-                safe_dist = r_sw + r_other
-                h_agent = dist_sq - safe_dist ** 2
+                    A_cx = 2.0 * dp[..., 0] / mass
+                    A_cy = 2.0 * dp[..., 1] / mass
+                    A_as = -2.0 * safe_dist * R_form
+                    A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
 
-                # 1st derivative: h_dot
-                r_dot_total = R_form * (s_dot + o_s_dot)
-                h_dot = 2.0 * (dp * dv).sum(dim=-1) - 2.0 * safe_dist * r_dot_total
+                    # HOCBF form with Reciprocal Collision Avoidance
+                    rhs = (h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_agent) * 0.5
+                    c_vals = (A_vec * X.unsqueeze(1)).sum(dim=-1) + rhs
 
-                # 2nd derivative drift term (part of h_ddot without relative acceleration)
-                h_ddot_drift = 2.0 * dv.pow(2).sum(dim=-1) - 2.0 * r_dot_total.pow(2)
+                    worst_c, worst_idx = torch.min(c_vals, dim=1)
+                    violated = worst_c < 0
 
-                A_cx = 2.0 * dp[:, 0] / mass
-                A_cy = 2.0 * dp[:, 1] / mass
-                A_as = -2.0 * safe_dist * R_form
-                A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
+                    if violated.any():
+                        row_idx = torch.arange(N, device=device)[violated]
+                        col_idx = worst_idx[violated]
+                        A_worst = A_vec[row_idx, col_idx]
+                        c_worst = worst_c[violated]
 
-                # Reciprocal HOCBF: each agent takes 50% responsibility
-                # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_agent >= 0
-                a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
-                rhs = (h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_agent) * 0.5
-
-                c_val = (A_vec * X).sum(dim=-1) + rhs
-                violated = c_val < 0
-                if violated.any():
-                    A_norm_sq = (A_vec * A_vec).sum(dim=-1)
-                    lam = torch.relu(-c_val / (A_norm_sq + 1e-8))
-                    correction = lam.unsqueeze(-1) * A_vec
-                    X = torch.where(
-                        violated.unsqueeze(-1).expand_as(X),
-                        X + correction,
-                        X,
-                    )
+                        A_norm_sq = (A_worst * A_worst).sum(dim=-1)
+                        lam = torch.relu(-c_worst / (A_norm_sq + 1e-8))
+                        X[violated] += lam.unsqueeze(-1) * A_worst
 
     # ================================================================
     # 5. Box clamp on translation (u_max)
