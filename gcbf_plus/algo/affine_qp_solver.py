@@ -211,8 +211,8 @@ def solve_affine_qp(
                     # 2nd derivative drift term
                     h_ddot_drift = 2.0 * agent_vel.pow(2).sum(dim=-1).unsqueeze(1) - 2.0 * r_dot.pow(2).unsqueeze(1)
 
-                    A_cx = 2.0 * dp[..., 0] / mass
-                    A_cy = 2.0 * dp[..., 1] / mass
+                    A_cx = 2.0 * dp[..., 0]
+                    A_cy = 2.0 * dp[..., 1]
                     A_as = -2.0 * safe_dist * R_form
                     A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1) # (N, n_obs, 3)
 
@@ -259,8 +259,8 @@ def solve_affine_qp(
                     h_dot = 2.0 * (dp * dv).sum(dim=-1) - 2.0 * safe_dist * r_dot_total
                     h_ddot_drift = 2.0 * dv.pow(2).sum(dim=-1) - 2.0 * r_dot_total.pow(2)
 
-                    A_cx = 2.0 * dp[..., 0] / mass
-                    A_cy = 2.0 * dp[..., 1] / mass
+                    A_cx = 2.0 * dp[..., 0]
+                    A_cy = 2.0 * dp[..., 1]
                     A_as = -2.0 * safe_dist * R_form
                     A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1)
 
