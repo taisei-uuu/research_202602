@@ -52,7 +52,9 @@ def solve_affine_qp(
     s_max: float = 1.5,
     alpha_scale: float = 2.0,
     # Obstacle CBF params
-    alpha_obs: float = 1.0, # Reverted to 1.0
+    alpha_obs: float = 1.0, 
+    alpha_obs_hoc1: float = 0.8,
+    alpha_obs_hoc2: float = 0.8,
     # HOCBF payload swing data (dynamic γ_max)
     payload_states: Optional[torch.Tensor] = None,
     cable_length: float = 1.0,
@@ -185,7 +187,7 @@ def solve_affine_qp(
         #    — high priority, applied near-last
         # ------------------------------------------------------------
         if has_obs:
-            a1, a2 = hocbf_alpha1, hocbf_alpha2
+            a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
             for j in range(n_obs):
                 oc = obs_centers[:, j, :]     # (N, 2)
                 ohs = obs_half_sizes[:, j, :]  # (N, 2)
@@ -266,7 +268,7 @@ def solve_affine_qp(
 
                 # Reciprocal HOCBF: each agent takes 50% responsibility
                 # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_agent >= 0
-                a1, a2 = hocbf_alpha1, hocbf_alpha2
+                a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
                 rhs = (h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_agent) * 0.5
 
                 c_val = (A_vec * X).sum(dim=-1) + rhs
