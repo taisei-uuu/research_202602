@@ -463,6 +463,48 @@ class SwarmIntegrator:
         self._last_lidar_hits = all_agent_hits
         return all_agent_hits
 
+    def get_lidar_hits(self, num_beams: int = 32) -> torch.Tensor:
+        """
+        Fixed-size LiDAR hit points for each agent.
+        Returns: (num_agents, num_beams, 4) tensor.
+        Non-hitting beams are filled with 1e6 (far away, ignored in QP).
+        Matches VectorizedSwarmEnv.get_lidar_hits() interface.
+        """
+        n = self.num_agents
+        device = self.agent_states.device
+        s_vals = self.scale_states[:, 0]
+        sensing_radii = self.comm_radius * s_vals
+        agent_pos = self.agent_states[:, :2]
+
+        angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
+        directions = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # (nb, 2)
+
+        result = torch.full((n, num_beams, 4), 1e6, device=device)
+
+        for i in range(n):
+            start = agent_pos[i]
+            radius = sensing_radii[i]
+            beam_ends = start + radius * directions  # (nb, 2)
+
+            for b_idx in range(num_beams):
+                end = beam_ends[b_idx]
+                min_t = 1.1
+                hit_pos = None
+
+                for obs in self._obstacles:
+                    p_hit = obs.ray_intersection(start, end)
+                    if p_hit is not None:
+                        t = torch.norm(p_hit - start) / radius
+                        if t < min_t:
+                            min_t = t
+                            hit_pos = p_hit
+
+                if hit_pos is not None:
+                    result[i, b_idx, :2] = hit_pos
+                    result[i, b_idx, 2:] = 0.0  # vx, vy = 0
+
+        return result
+
     # ── Graph builder ─────────────────────────────────────────────────
     def _get_graph(self) -> GraphsTuple:
         # 1. Update LiDAR sensing
