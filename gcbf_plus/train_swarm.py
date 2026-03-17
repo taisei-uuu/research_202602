@@ -559,7 +559,6 @@ def main():
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--coef_goal", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
-    parser.add_argument("--coef_scale", type=float, default=0.5)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")
