@@ -60,6 +60,8 @@ def _velocity_to_accel(
     K_v: float,
     K_s: float,
     v_max: float,
+    s_max: float = 1.5,
+    K_s_pos: float = 1.0,
     u_max: float = None,
     mass: float = 0.1,
     n_drones: int = 3,
@@ -68,10 +70,12 @@ def _velocity_to_accel(
 
     Parameters
     ----------
-    pi_scaled : (..., 3) — (Δv_x, Δv_y, ṡ_target) already in physical units.
+    pi_scaled : (..., 3) — (Δv_x, Δv_y, Δṡ) already in physical units.
     agent_states : (..., 4) — [px, py, vx, vy]
     goal_states : (..., 4) — [gx, gy, gvx, gvy]
     scale_states : (..., 2) — [s, s_dot]
+    s_max : float — maximum scale value (expansion target).
+    K_s_pos : float — proportional gain for scale expansion PD.
     u_max : float or None — per-motor thrust limit. If given, pre-clamp output.
     mass  : float — per-drone mass (for computing feasible acceleration).
     n_drones : int — drones per swarm (default 3).
@@ -81,6 +85,7 @@ def _velocity_to_accel(
     u_nom : (..., 3) — [a_cx_nom, a_cy_nom, a_s_nom]
     """
     # Level 1: target velocity
+    # Translation: LQR (goal-reaching) + GNN offset
     pos = agent_states[..., :2]
     goal_pos = goal_states[..., :2]
     v_current = agent_states[..., 2:4]
@@ -89,8 +94,11 @@ def _velocity_to_accel(
     v_ref = torch.clamp(v_ref, -v_max, v_max)
     v_target = v_ref + pi_scaled[..., :2]
 
-    s_dot_target = pi_scaled[..., 2]
+    # Scale: PD toward s_max (expansion potential) + GNN offset
+    s_current = scale_states[..., 0]
     s_dot_current = scale_states[..., 1]
+    s_dot_ref = K_s_pos * (s_max - s_current)  # "want to expand toward s_max"
+    s_dot_target = s_dot_ref + pi_scaled[..., 2]  # GNN can correct (e.g. contract)
 
     # Level 2: PD controller
     a_trans = K_v * (v_target - v_current)
@@ -129,7 +137,6 @@ def train(
     lr_actor: float = 1e-4,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
-    coef_scale: float = 0.5,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -192,7 +199,7 @@ def train(
 
     history: Dict[str, list] = {
         "step": [], "loss/total": [], "loss/goal": [],
-        "loss/qp": [], "loss/scale": [],
+        "loss/qp": [],
     }
 
     print("=" * 60)
@@ -203,7 +210,7 @@ def train(
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
-    print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}  coef_scale={coef_scale}")
+    print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}")
     print("=" * 60)
     t_start = time.time()
 
@@ -253,7 +260,7 @@ def train(
                 u_nom = _velocity_to_accel(
                     pi_scaled, vec_env._agent_states, goal_fixed,
                     vec_env._scale_states, K_pos, K_v, K_s, v_max,
-                    u_max=u_max, mass=mass,
+                    s_max=s_max, u_max=u_max, mass=mass,
                 )
 
                 # Level 3: QP solve
@@ -374,7 +381,7 @@ def train(
                 u_nom = _velocity_to_accel(
                     pi_scaled, mb_agent, mb_goal,
                     mb_scale, K_pos, K_v, K_s, v_max,
-                    u_max=u_max, mass=mass,
+                    s_max=s_max, u_max=u_max, mass=mass,
                 )
                 u_nom_flat = u_nom.reshape(mb_size * num_agents, 3)
 
@@ -436,20 +443,12 @@ def train(
                     )
 
                 # ── Loss ──
-                # Extract per-agent scale and GNN scale output for L_scale
-                s_flat = mb_scale[:, :, 0].reshape(-1)          # (mb*n,)
-                s_dot_target_flat = pi_scaled[:, :, 2].reshape(-1)  # (mb*n,) — has grad
-
                 loss, info = compute_affine_loss(
                     pi_action=pi_agents.reshape(-1, 3),
                     u_nom=u_nom_flat,
                     u_qp=u_qp_flat,
-                    s_current=s_flat,
-                    s_dot_target=s_dot_target_flat,
-                    s_max=s_max,
                     coef_goal=coef_goal,
                     coef_qp=coef_qp,
-                    coef_scale=coef_scale,
                 )
                 # QP intervention tracking
                 qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
@@ -498,7 +497,6 @@ def train(
                 f"  |  loss {avg_info.get('loss/total', 0):.4f}"
                 f"  goal {avg_info.get('loss/goal', 0):.4f}"
                 f"  qp {avg_info.get('loss/qp', 0):.4f}"
-                f"  scale {avg_info.get('loss/scale', 0):.4f}"
                 f"  |  upd={n_updates}"
                 f"  |  s: {mean_s:.2f} [{min_s:.2f},{max_s:.2f}]"
                 f"  |  γ: {mean_gamma:.3f} p95={p95_gamma:.3f}"
