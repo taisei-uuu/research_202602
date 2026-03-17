@@ -386,7 +386,7 @@ class VectorizedSwarmEnv:
 
         return agent_collision | obs_collision
 
-    def get_lidar_hits(self, num_beams: int = 16) -> torch.Tensor:
+    def get_lidar_hits(self, num_beams: int = 32) -> torch.Tensor:
         """
         Vectorized LiDAR sensing against AABB obstacles.
         Returns: (B, n, num_beams, 4) [px, py, vx, vy] hit points.

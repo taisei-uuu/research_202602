@@ -216,9 +216,12 @@ def solve_affine_qp(
                     # 2nd derivative drift term
                     h_ddot_drift = 2.0 * agent_vel.pow(2).sum(dim=-1).unsqueeze(1) - 2.0 * r_dot.pow(2).unsqueeze(1)
 
-                    A_cx = 2.0 * dp[..., 0]
-                    A_cy = 2.0 * dp[..., 1]
-                    A_as = -2.0 * safe_dist * R_form
+                    A_cx = 2.0 * dp[..., 0] # (N, n_obs)
+                    A_cy = 2.0 * dp[..., 1] # (N, n_obs)
+                    A_as = -2.0 * safe_dist * R_form # (N, 1)
+                    # Broadcast A_as to match A_cx/A_cy (N, n_obs)
+                    A_as = A_as.expand(-1, n_obs)
+                    
                     A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1) # (N, n_obs, 3)
 
                     # HOCBF form: h_ddot + (a1 + a2)*h_dot + (a1 * a2)*h_obs >= 0

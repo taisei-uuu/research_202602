@@ -261,8 +261,9 @@ def train(
                 ps_flat = vec_env._payload_states.reshape(BN, 4)
 
                 # Use LiDAR hits for QP instead of centers
-                lidar_hits = vec_env.get_lidar_hits(num_beams=16) # (B, n, nb, 4)
-                obs_hits_flat = lidar_hits[..., :2].reshape(BN, 16, 2)
+                nb = 32
+                lidar_hits = vec_env.get_lidar_hits(num_beams=nb) # (B, n, nb, 4)
+                obs_hits_flat = lidar_hits[..., :2].reshape(BN, nb, 2)
                 
                 # Agent-Agent info
                 if num_agents > 1:
