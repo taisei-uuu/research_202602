@@ -33,8 +33,7 @@ import torch
 def solve_affine_qp(
     u_nom: torch.Tensor,
     # Obstacle CBF data
-    obs_centers: Optional[torch.Tensor] = None,
-    obs_half_sizes: Optional[torch.Tensor] = None,
+    obs_hits: Optional[torch.Tensor] = None,
     agent_pos: Optional[torch.Tensor] = None,
     agent_vel: Optional[torch.Tensor] = None,
     s: Optional[torch.Tensor] = None,
@@ -111,26 +110,27 @@ def solve_affine_qp(
         clamped_ratio = torch.clamp(ratio, 0.0, 0.95)
         gamma_dyn = torch.asin(clamped_ratio)
 
-        # X-axis HOCBF coefficients (Translation only)
-        h1x = gamma_dyn**2 - gx**2
-        h1dx = -2 * gx * gx_dot
-        h2x = h1dx + a1 * h1x
-        
-        Cx = 2 * gx * torch.cos(gx) / l
-        Dx = (2 * gx_dot**2
-              - 2 * gx * (-(g_val / l) * torch.sin(gx) - c_damp * gx_dot)
-              + a1 * h1dx
-              - a2 * h2x)
+        # Common HOCBF params
+        alpha_sum = a1 + a2
+        alpha_prod = a1 * a2
 
-        # Y-axis HOCBF coefficients (Translation only)
-        h1y = gamma_dyn**2 - gy**2
-        h1dy = -2 * gy * gy_dot
-        h2y = h1dy + a1 * h1y
-        Cy = 2 * gy * torch.cos(gy) / l
-        Dy = (2 * gy_dot**2
-              - 2 * gy * (-(g_val / l) * torch.sin(gy) - c_damp * gy_dot)
-              + a1 * h1dy
-              - a2 * h2y)
+        # --- X-axis HOCBF ---
+        h_x = gamma_dyn**2 - gx**2
+        h_dot_x = -2.0 * gx * gx_dot
+        # h_ddot_drift = -2*gx_dot^2 - 2*gx * (-(g/l)sin(gx) - c*gx_dot)
+        h_ddot_drift_x = -2.0 * gx_dot**2 + (2.0 * gx * g_val / l) * torch.sin(gx) + 2.0 * gx * c_damp * gx_dot
+        
+        Cx = (2.0 * gx * torch.cos(gx)) / l
+        rhs_x = h_ddot_drift_x + alpha_sum * h_dot_x + alpha_prod * h_x
+
+        # --- Y-axis HOCBF ---
+        h_y = gamma_dyn**2 - gy**2
+        h_dot_y = -2.0 * gy * gy_dot
+        # h_ddot_drift = -2*gy_dot^2 - 2*gy * (-(g/l)sin(gy) - c*gy_dot)
+        h_ddot_drift_y = -2.0 * gy_dot**2 + (2.0 * gy * g_val / l) * torch.sin(gy) + 2.0 * gy * c_damp * gy_dot
+        
+        Cy = (2.0 * gy * torch.cos(gy)) / l
+        rhs_y = h_ddot_drift_y + alpha_sum * h_dot_y + alpha_prod * h_y
 
         # Apply projections (X used in the loop below)
         # Note: In this vectorized version, the actual projection happens in the loop.
@@ -138,7 +138,7 @@ def solve_affine_qp(
         # Since X is (N, 3), we need to handle this 3D constraint.
 
     # Pre-compute obstacle CBF data (constant across iterations)
-    has_obs = (obs_centers is not None and obs_half_sizes is not None
+    has_obs = (obs_hits is not None
                and agent_pos is not None and agent_vel is not None
                and s is not None and s_dot is not None)
     
@@ -163,15 +163,15 @@ def solve_affine_qp(
         if has_hocbf:
             eps_c = 1e-6
 
-            # X-axis: project a_cx
-            c_val_x = Cx * X[:, 0] + Dx
+            # X-axis: Cx * a_cx + rhs_x >= 0
+            c_val_x = Cx * X[:, 0] + rhs_x
             violate_x = (c_val_x < 0) & (Cx.abs() > eps_c)
             if violate_x.any():
                 lam = torch.relu(-c_val_x / (Cx**2 + 1e-8))
                 X[violate_x, 0] += lam[violate_x] * Cx[violate_x]
 
-            # Y-axis: project a_cy
-            c_val_y = Cy * X[:, 1] + Dy
+            # Y-axis: Cy * a_cy + rhs_y >= 0
+            c_val_y = Cy * X[:, 1] + rhs_y
             violate_y = (c_val_y < 0) & (Cy.abs() > eps_c)
             if violate_y.any():
                 lam = torch.relu(-c_val_y / (Cy**2 + 1e-8))
@@ -182,11 +182,13 @@ def solve_affine_qp(
         #    — medium priority, applied before collisions
         # ------------------------------------------------------------
         if has_scale:
-            # s and s_dot are verified by has_scale
-            lower_bound = -alpha_scale * s_dot - alpha_scale * (s - s_min)
+            # 2nd Order HOCBF for scale: a_s + (a1+a2)s_dot + a1*a2(s - s_min) >= 0
+            # lower_bound: a_s >= -(alpha_sum * s_dot) - (alpha_prod * (s - s_min))
+            lower_bound = -alpha_sum * s_dot - alpha_prod * (s - s_min)
             X[:, 2] = torch.max(X[:, 2], lower_bound)
 
-            upper_bound = -alpha_scale * s_dot + alpha_scale * (s_max - s)
+            # upper_bound: a_s <= -(alpha_sum * s_dot) + (alpha_prod * (s_max - s))
+            upper_bound = -alpha_sum * s_dot + alpha_prod * (s_max - s)
             X[:, 2] = torch.min(X[:, 2], upper_bound)
 
         # ------------------------------------------------------------
@@ -195,12 +197,12 @@ def solve_affine_qp(
         # ------------------------------------------------------------
         if has_obs:
             # Re-check for lint/type safety
-            if obs_centers is not None and obs_half_sizes is not None:
-                n_obs = obs_centers.shape[1]
+            if obs_hits is not None:
+                n_obs = obs_hits.shape[1]
                 if n_obs > 0:
                     a1, a2 = alpha_obs_hoc1, alpha_obs_hoc2
                     # Broadened dims for vectorization: (N, n_obs, dim)
-                    dp = agent_pos.unsqueeze(1) - obs_centers
+                    dp = agent_pos.unsqueeze(1) - obs_hits
                     dist_sq = (dp * dp).sum(dim=-1)
 
                     r_sw = R_form * s + r_margin

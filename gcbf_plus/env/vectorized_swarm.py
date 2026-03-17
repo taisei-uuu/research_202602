@@ -252,8 +252,8 @@ class VectorizedSwarmEnv:
         if u_max is not None:
             a_trans = torch.clamp(a_trans, -u_max, u_max)
 
-        # ── Translation dynamics ──
-        accel = a_trans / m
+        # ── Translation dynamics (CoM) ──
+        accel = a_trans
         x = self._agent_states
         new_pos = x[:, :, :2] + x[:, :, 2:4] * dt + 0.5 * accel * dt**2
         new_vel = x[:, :, 2:4] + accel * dt

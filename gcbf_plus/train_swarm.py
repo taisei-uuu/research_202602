@@ -290,7 +290,7 @@ def train(
 
                 u_qp_flat = solve_affine_qp(
                     u_nom=u_nom_flat,
-                    obs_centers=obs_hits_flat, obs_half_sizes=None,
+                    obs_hits=obs_hits_flat,
                     agent_pos=pos_flat, agent_vel=vel_flat,
                     s=s_flat, s_dot=s_dot_flat,
                     other_agent_pos=other_pos_flat,
