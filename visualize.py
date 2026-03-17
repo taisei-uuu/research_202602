@@ -218,17 +218,10 @@ def run_simulation(
                 sd = env.scale_states[:, 1]
                 ps = env.payload_states
 
-                # Obstacle hits from LiDAR
-                lidar_points_list = env.get_lidar_points(num_beams=16)
-                # Stack to (num_agents, 16, 2)
-                lidar_hits = torch.stack([hits[..., :2] if hits.shape[0] > 0 
-                                         else torch.full((16, 2), 1e6, device=pos.device) 
-                                         for hits in lidar_points_list])
-                if lidar_hits.shape[1] != 16:
-                     # Handle cases where some agents might have different number of hits (should be 16 due to fixed beams)
-                     # But SwarmIntegrator's get_lidar_points only returns ACTUAL hits? 
-                     # Let me check swarm_integrator.py again.
-                     pass
+                # Obstacle hits from LiDAR — always returns (num_agents, 32, 4)
+                nb = 32
+                lidar_hits_4d = env.get_lidar_hits(num_beams=nb)  # (num_agents, nb, 4)
+                lidar_hits = lidar_hits_4d[..., :2]               # (num_agents, nb, 2)
 
                 # Agent-Agent info
                 if num_agents > 1:
