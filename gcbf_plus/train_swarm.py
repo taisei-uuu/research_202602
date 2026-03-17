@@ -198,7 +198,7 @@ def train(
     N_pool = horizon * batch_size
 
     history: Dict[str, list] = {
-        "step": [], "loss/total": [], "loss/goal": [],
+        "step": [], "loss/total": [], "loss/progress": [],
         "loss/qp": [],
     }
 
@@ -210,7 +210,7 @@ def train(
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
-    print(f"  coef_goal={coef_goal}  coef_qp={coef_qp}")
+    print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}")
     print("=" * 60)
     t_start = time.time()
 
@@ -443,11 +443,25 @@ def train(
                     )
 
                 # ── Loss ──
+                # Compute v_target for L_progress (has grad through pi_scaled)
+                agent_pos_mb = mb_agent[:, :, :2]   # (mb, n, 2)
+                goal_pos_mb = mb_goal[:, :, :2]     # (mb, n, 2)
+                v_current_mb = mb_agent[:, :, 2:4]  # (mb, n, 2)
+
+                v_ref_mb = K_pos * (goal_pos_mb - agent_pos_mb)
+                v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
+                v_target_mb = v_ref_mb + pi_scaled[:, :, :2]  # (mb, n, 2) — has grad
+
+                v_target_flat = v_target_mb.reshape(-1, 2)           # (mb*n, 2)
+                goal_dir_flat = (goal_pos_mb - agent_pos_mb).reshape(-1, 2).detach()  # (mb*n, 2)
+
                 loss, info = compute_affine_loss(
                     pi_action=pi_agents.reshape(-1, 3),
                     u_nom=u_nom_flat,
                     u_qp=u_qp_flat,
-                    coef_goal=coef_goal,
+                    v_target=v_target_flat,
+                    goal_dir=goal_dir_flat,
+                    coef_progress=coef_goal,
                     coef_qp=coef_qp,
                 )
                 # QP intervention tracking
@@ -495,7 +509,7 @@ def train(
             print(
                 f"  step {step:5d}/{num_steps}"
                 f"  |  loss {avg_info.get('loss/total', 0):.4f}"
-                f"  goal {avg_info.get('loss/goal', 0):.4f}"
+                f"  progress {avg_info.get('loss/progress', 0):.4f}"
                 f"  qp {avg_info.get('loss/qp', 0):.4f}"
                 f"  |  upd={n_updates}"
                 f"  |  s: {mean_s:.2f} [{min_s:.2f},{max_s:.2f}]"

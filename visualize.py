@@ -185,12 +185,18 @@ def run_simulation(
                 pos = env.agent_states[:, :2]
                 goal_pos = env.goal_states[:, :2]
                 v_current = env.agent_states[:, 2:4]
+                s_current = env.scale_states[:, 0]
                 s_dot_current = env.scale_states[:, 1]
 
+                # Translation: LQR (goal-reaching) + GNN offset
                 v_ref = K_pos_cfg * (goal_pos - pos)
                 v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
                 v_target = v_ref + pi_scaled[:, :2]
-                s_dot_target = pi_scaled[:, 2]
+
+                # Scale: PD toward s_max (expansion potential) + GNN offset
+                K_s_pos = 1.0
+                s_dot_ref = K_s_pos * (s_max - s_current)
+                s_dot_target = s_dot_ref + pi_scaled[:, 2]
 
                 a_trans = K_v_cfg * (v_target - v_current)
                 a_s = K_s_cfg * (s_dot_target - s_dot_current)
