@@ -260,13 +260,10 @@ def train(
                 s_dot_flat = vec_env._scale_states[:, :, 1].reshape(BN)
                 ps_flat = vec_env._payload_states.reshape(BN, 4)
 
-                if obs_centers is not None:
-                    obs_c_exp = obs_centers.unsqueeze(1).expand(-1, num_agents, -1, -1).reshape(BN, n_obs, 2)
-                    obs_hs_exp = obs_half_sizes.unsqueeze(1).expand(-1, num_agents, -1, -1).reshape(BN, n_obs, 2)
-                else:
-                    obs_c_exp = None
-                    obs_hs_exp = None
-
+                # Use LiDAR hits for QP instead of centers
+                lidar_hits = vec_env.get_lidar_hits(num_beams=16) # (B, n, nb, 4)
+                obs_hits_flat = lidar_hits[..., :2].reshape(BN, 16, 2)
+                
                 # Agent-Agent info
                 if num_agents > 1:
                     dev = vec_env._agent_states.device
@@ -293,7 +290,7 @@ def train(
 
                 u_qp_flat = solve_affine_qp(
                     u_nom=u_nom_flat,
-                    obs_centers=obs_c_exp, obs_half_sizes=obs_hs_exp,
+                    obs_centers=obs_hits_flat, obs_half_sizes=None,
                     agent_pos=pos_flat, agent_vel=vel_flat,
                     s=s_flat, s_dot=s_dot_flat,
                     other_agent_pos=other_pos_flat,

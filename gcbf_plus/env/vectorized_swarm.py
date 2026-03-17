@@ -102,6 +102,7 @@ class VectorizedSwarmEnv:
         self._obstacle_half_sizes: Optional[torch.Tensor] = None
         self._obstacle_states: Optional[torch.Tensor] = None
         self._payload_states: Optional[torch.Tensor] = None  # (B, n, 4)
+        self._last_lidar_hits: Optional[torch.Tensor] = None # (B, n, n_beams, 4) [px, py, vx, vy]
         self._step_count = 0
 
     @property
@@ -385,19 +386,95 @@ class VectorizedSwarmEnv:
 
         return agent_collision | obs_collision
 
+    def get_lidar_hits(self, num_beams: int = 16) -> torch.Tensor:
+        """
+        Vectorized LiDAR sensing against AABB obstacles.
+        Returns: (B, n, num_beams, 4) [px, py, vx, vy] hit points.
+        Points that don't hit anything are set to a very far distance.
+        """
+        B = self.batch_size
+        n = self.num_agents
+        device = self._agent_states.device
+        
+        pos = self._agent_states[:, :, :2] # (B, n, 2)
+        s = self._scale_states[:, :, 0]    # (B, n)
+        sensing_radius = (self.comm_radius * s).unsqueeze(-1) # (B, n, 1)
+
+        # 1. Setup beams
+        angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
+        dir = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1) # (num_beams, 2)
+        
+        # Ray starts (B, n, 1, 2), Ray ends (B, n, num_beams, 2)
+        p0 = pos.unsqueeze(2)
+        p1 = p0 + sensing_radius.unsqueeze(-1) * dir.view(1, 1, num_beams, 2)
+        
+        # 2. AABB Ray-Intersection (vectorized over B, n, beams, n_obs)
+        # obs_c: (B, 1, 1, n_obs, 2), obs_hs: (B, 1, 1, n_obs, 2)
+        if self._obstacle_centers is None or self._obstacle_centers.shape[1] == 0:
+            hits = torch.full((B, n, num_beams, 4), 1e6, device=device)
+            self._last_lidar_hits = hits
+            return hits
+
+        n_obs = self._obstacle_centers.shape[1]
+        oc = self._obstacle_centers.view(B, 1, 1, n_obs, 2)
+        ohs = self._obstacle_half_sizes.view(B, 1, 1, n_obs, 2)
+        
+        # Ray direction D = P1 - P0
+        D = (p1 - p0).unsqueeze(3) # (B, n, n_beams, 1, 2)
+        p0_exp = p0.unsqueeze(3)    # (B, n, 1, 1, 2) 
+        
+        p_min = oc - ohs
+        p_max = oc + ohs
+        
+        eps = 1e-8
+        t_low = (p_min - p0_exp) / (D + eps)
+        t_high = (p_max - p0_exp) / (D + eps)
+        
+        t_near = torch.max(torch.min(t_low, t_high), dim=-1).values # (B, n, n_beams, n_obs)
+        t_far = torch.min(torch.max(t_low, t_high), dim=-1).values  # (B, n, n_beams, n_obs)
+        
+        # Valid hit conditions: t_near <= t_far and t_far >= 0 and 0 <= t_near <= 1
+        valid = (t_near <= t_far) & (t_far >= 0.0) & (t_near >= 0.0) & (t_near <= 1.0)
+        t_near = torch.where(valid, t_near, torch.tensor(1.1, device=device))
+        
+        # Find closest hit among all obstacles for each beam
+        min_t, _ = torch.min(t_near, dim=-1) # (B, n, n_beams)
+        hit_mask = min_t <= 1.0
+        
+        # Final hit points
+        hit_pos = p0 + min_t.unsqueeze(-1) * (p1 - p0)
+        
+        # Assemble (B, n, n_beams, 4) [px, py, 0, 0]
+        res = torch.zeros((B, n, num_beams, 4), device=device)
+        res[..., :2] = hit_pos
+        # Only keep hits that actually occurred, else set to far away to ignore in GNN
+        res[~hit_mask] = 1e6
+        
+        self._last_lidar_hits = res
+        return res
+
     # ── Graph builder ─────────────────────────────────────────────────
     def build_batch_graph(self, agent_states=None, scale_states=None) -> GraphsTuple:
         if agent_states is None:
             agent_states = self._agent_states
         if scale_states is None:
             scale_states = self._scale_states
-        # Dynamic comm_radius: comm_base * s  → (B, n)
+            
+        # 1. Update LiDAR hits for this step
+        hits = self.get_lidar_hits(num_beams=16) # (B, n, n_beams, 4)
+        
+        # 2. Build graph using hit points instead of centers
+        # Flatten hits for graph builder: (B, n * n_beams, 4)
+        B, n, nb, _ = hits.shape
+        flat_hits = hits.view(B, n * nb, 4)
+        
         s = scale_states[:, :, 0]
         dyn_cr = self.comm_radius * s
+        
         return build_vectorized_swarm_graph(
             agent_states=agent_states,
             goal_states=self._goal_states,
-            obstacle_states=self._obstacle_states,
+            obstacle_states=flat_hits, # センターではなくヒットポイントを渡す！
             comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,

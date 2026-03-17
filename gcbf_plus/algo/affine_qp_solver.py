@@ -203,9 +203,8 @@ def solve_affine_qp(
                     dp = agent_pos.unsqueeze(1) - obs_centers
                     dist_sq = (dp * dp).sum(dim=-1)
 
-                    R_obs = torch.max(obs_half_sizes, dim=-1).values
                     r_sw = R_form * s + r_margin
-                    safe_dist = r_sw.unsqueeze(1) + R_obs
+                    safe_dist = r_sw.unsqueeze(1) # (N, 1) or (N, n_obs)
                     h_obs = dist_sq - safe_dist ** 2
 
                     # 1st derivative: h_dot
