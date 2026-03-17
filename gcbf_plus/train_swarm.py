@@ -223,6 +223,7 @@ def train(
         pool_payload = []
         pool_goal = []
         pool_obs = []
+        pool_obs_hits = []  # LiDAR hit points pool
 
         with torch.no_grad():
             for t in range(horizon):
@@ -231,6 +232,10 @@ def train(
                 pool_payload.append(vec_env._payload_states.clone())
                 pool_goal.append(goal_fixed.clone())
                 pool_obs.append(obs_fixed.clone())
+                # Collect LiDAR hits (B, n, nb, 2) - position only
+                nb = 32
+                lidar_hits_t = vec_env.get_lidar_hits(num_beams=nb)[..., :2]  # (B, n, nb, 2)
+                pool_obs_hits.append(lidar_hits_t.clone())
 
                 # Level 1: GNN → tanh → scale to physical velocity
                 mega = vec_env.build_batch_graph()
@@ -260,10 +265,8 @@ def train(
                 s_dot_flat = vec_env._scale_states[:, :, 1].reshape(BN)
                 ps_flat = vec_env._payload_states.reshape(BN, 4)
 
-                # Use LiDAR hits for QP instead of centers
-                nb = 32
-                lidar_hits = vec_env.get_lidar_hits(num_beams=nb) # (B, n, nb, 4)
-                obs_hits_flat = lidar_hits[..., :2].reshape(BN, nb, 2)
+                # Use LiDAR hits for QP instead of centers (already collected)
+                obs_hits_flat = lidar_hits_t.reshape(BN, nb, 2)
                 
                 # Agent-Agent info
                 if num_agents > 1:
@@ -320,12 +323,7 @@ def train(
         all_goal = torch.stack(pool_goal).reshape(N_pool, num_agents, 4)
         all_obs_st = torch.stack(pool_obs).reshape(N_pool, n_obs, 4)
 
-        if obs_centers is not None:
-            all_obs_c = obs_centers.unsqueeze(0).expand(horizon, -1, -1, -1).reshape(N_pool, n_obs, 2)
-            all_obs_hs = obs_half_sizes.unsqueeze(0).expand(horizon, -1, -1, -1).reshape(N_pool, n_obs, 2)
-        else:
-            all_obs_c = None
-            all_obs_hs = None
+        all_obs_hits = torch.stack(pool_obs_hits).reshape(N_pool, num_agents, -1, 2)  # (N_pool, n, nb, 2)
 
         perm = torch.randperm(N_pool, device=dev)
 
@@ -349,6 +347,7 @@ def train(
                 mb_payload = all_payload[idx]
                 mb_goal = all_goal[idx]
                 mb_obs_st = all_obs_st[idx]
+                mb_obs_hits = all_obs_hits[idx]  # (mb, n, nb, 2)
 
                 # ── Build graph (dynamic comm_radius) ──
                 dyn_cr = vec_env.comm_radius * mb_scale[:, :, 0]  # (mb, n)
@@ -387,16 +386,12 @@ def train(
                     sd_f = mb_scale.reshape(-1, 2)[:, 1]
                     ps_f = mb_payload.reshape(-1, 4)
 
-                    if all_obs_c is not None:
-                        mb_obs_c = all_obs_c[idx]
-                        mb_obs_hs = all_obs_hs[idx]
-                        obs_c_exp = mb_obs_c.unsqueeze(1).expand(-1, num_agents, -1, -1) \
-                                           .reshape(mb_size * num_agents, n_obs, 2)
-                        obs_hs_exp = mb_obs_hs.unsqueeze(1).expand(-1, num_agents, -1, -1) \
-                                            .reshape(mb_size * num_agents, n_obs, 2)
+                    # LiDAR hits for this mini-batch
+                    if mb_obs_hits is not None:
+                        obs_hits_mb = mb_obs_hits.unsqueeze(1).expand(-1, num_agents, -1, -1) \
+                                                 .reshape(mb_size * num_agents, -1, 2)
                     else:
-                        obs_c_exp = None
-                        obs_hs_exp = None
+                        obs_hits_mb = None
 
                     # Agent-Agent info
                     if num_agents > 1:
@@ -424,7 +419,7 @@ def train(
 
                     u_qp_flat = solve_affine_qp(
                         u_nom=u_nom_flat.detach(),
-                        obs_centers=obs_c_exp, obs_half_sizes=obs_hs_exp,
+                        obs_hits=obs_hits_mb,
                         agent_pos=states_flat[:, :2], agent_vel=states_flat[:, 2:4],
                         s=s_f, s_dot=sd_f,
                         other_agent_pos=mb_other_pos_flat,
