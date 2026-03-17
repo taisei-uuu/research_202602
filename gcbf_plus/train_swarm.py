@@ -387,9 +387,9 @@ def train(
                     ps_f = mb_payload.reshape(-1, 4)
 
                     # LiDAR hits for this mini-batch
+                    # mb_obs_hits shape: (mb_size, n, nb, 2) — already per-agent
                     if mb_obs_hits is not None:
-                        obs_hits_mb = mb_obs_hits.unsqueeze(1).expand(-1, num_agents, -1, -1) \
-                                                 .reshape(mb_size * num_agents, -1, 2)
+                        obs_hits_mb = mb_obs_hits.reshape(mb_size * num_agents, -1, 2)
                     else:
                         obs_hits_mb = None
 
