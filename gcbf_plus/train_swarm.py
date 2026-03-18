@@ -232,6 +232,7 @@ def train(
         pool_goal = []
         pool_obs = []
         pool_obs_hits = []  # LiDAR hit points pool
+        info = {}
 
         with torch.no_grad():
             for t in range(horizon):
