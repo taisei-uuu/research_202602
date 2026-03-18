@@ -472,6 +472,8 @@ def train(
 
                 v_ref_mb = K_pos * (goal_pos_mb - agent_pos_mb)
                 v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
+                v_target_mb = v_ref_mb + pi_scaled[:, :, :2]  # (mb, n, 2) — has grad
+
                 v_target_flat = v_target_mb.reshape(-1, 2)           # (mb*n, 2)
                 goal_dir_flat = (goal_pos_mb - agent_pos_mb).reshape(-1, 2).detach()  # (mb*n, 2)
 
