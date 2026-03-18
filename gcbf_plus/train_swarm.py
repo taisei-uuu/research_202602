@@ -472,12 +472,10 @@ def train(
 
                 v_ref_mb = K_pos * (goal_pos_mb - agent_pos_mb)
                 v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
-                v_target_mb = v_ref_mb + pi_scaled[:, :, :2]  # (mb, n, 2) — has grad
-
                 v_target_flat = v_target_mb.reshape(-1, 2)           # (mb*n, 2)
                 goal_dir_flat = (goal_pos_mb - agent_pos_mb).reshape(-1, 2).detach()  # (mb*n, 2)
 
-                loss, info = compute_affine_loss(
+                loss, batch_info = compute_affine_loss(
                     pi_action=pi_agents.reshape(-1, 3),
                     u_nom=u_nom_flat,
                     u_qp=u_qp_flat,
@@ -490,8 +488,8 @@ def train(
                 )
                 # QP intervention tracking
                 qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
-                info["qp_cut/mean"] = qp_intervention.mean().item()
-                info["qp_cut/max"] = qp_intervention.max().item()
+                batch_info["qp_cut/mean"] = qp_intervention.mean().item()
+                batch_info["qp_cut/max"] = qp_intervention.max().item()
 
                 optim.zero_grad()
                 loss.backward()
