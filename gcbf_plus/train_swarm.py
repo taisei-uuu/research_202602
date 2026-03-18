@@ -137,6 +137,8 @@ def train(
     lr_actor: float = 1e-4,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
+    coef_effort: float = 0.3,
+    w_scale: float = 2.0,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -199,7 +201,7 @@ def train(
 
     history: Dict[str, list] = {
         "step": [], "loss/total": [], "loss/progress": [],
-        "loss/qp": [],
+        "loss/qp": [], "loss/effort": [],
     }
 
     print("=" * 60)
@@ -210,7 +212,7 @@ def train(
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
-    print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}")
+    print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_effort={coef_effort}  w_scale={w_scale}")
     print("=" * 60)
     t_start = time.time()
 
@@ -463,6 +465,8 @@ def train(
                     goal_dir=goal_dir_flat,
                     coef_progress=coef_goal,
                     coef_qp=coef_qp,
+                    coef_effort=coef_effort,
+                    w_scale=w_scale,
                 )
                 # QP intervention tracking
                 qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
@@ -511,6 +515,7 @@ def train(
                 f"  |  loss {avg_info.get('loss/total', 0):.4f}"
                 f"  progress {avg_info.get('loss/progress', 0):.4f}"
                 f"  qp {avg_info.get('loss/qp', 0):.4f}"
+                f"  effort {avg_info.get('loss/effort', 0):.4f}"
                 f"  |  upd={n_updates}"
                 f"  |  s: {mean_s:.2f} [{min_s:.2f},{max_s:.2f}]"
                 f"  |  γ: {mean_gamma:.3f} p95={p95_gamma:.3f}"
@@ -573,6 +578,8 @@ def main():
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--coef_goal", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
+    parser.add_argument("--coef_effort", type=float, default=0.3)
+    parser.add_argument("--w_scale", type=float, default=2.0)
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")
