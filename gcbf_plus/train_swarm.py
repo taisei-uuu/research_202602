@@ -218,6 +218,9 @@ def train(
 
     # Initialize environment once at the beginning
     vec_env.reset(dev)
+    info = {
+        "life/avg": 0.0, "life/min": 0.0, "life/max": 0.0, "life/reset_rate": 0.0
+    }
 
     for step in range(1, num_steps + 1):
 
@@ -229,10 +232,7 @@ def train(
         pool_agent = []
         pool_scale = []
         pool_payload = []
-        pool_goal = []
-        pool_obs = []
         pool_obs_hits = []  # LiDAR hit points pool
-        info = {}
 
         with torch.no_grad():
             for t in range(horizon):
@@ -530,8 +530,8 @@ def train(
                   f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ef:{avg_info.get('loss/effort',0):.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f}) | "
                   f"G: {mean_gamma:.2f}/{mean_gamma_limit:.2f} (max:{max_gamma:.2f}, p95:{p95_gamma:.2f}, v:{viol_rate:.2%})")
-            print(f"      Life: {info['life/avg']:.1f} ({info['life/min']:.0f}-{info['life/max']:.0f}) | "
-                  f"Reset: {info['life/reset_rate']:.1%} | {elapsed:.0f}s")
+            print(f"      Life: {info.get('life/avg', 0.0):.1f} ({info.get('life/min', 0.0):.0f}-{info.get('life/max', 0.0):.0f}) | "
+                  f"Reset: {info.get('life/reset_rate', 0.0):.1%} | {elapsed:.0f}s")
             history["step"].append(step)
             for k in history:
                 if k != "step" and k in avg_info:
