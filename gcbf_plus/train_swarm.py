@@ -328,6 +328,15 @@ def train(
                 reset_indices = torch.where(done_masks)[0]
                 if len(reset_indices) > 0:
                     vec_env.reset_at_indices(reset_indices)
+                
+                # Tracking lifecycle for logging
+                if t == horizon - 1:
+                    # Final step counts in this horizon
+                    cur_steps = vec_env._step_counts.float()
+                    info["life/avg"] = cur_steps.mean().item()
+                    info["life/max"] = cur_steps.max().item()
+                    info["life/min"] = cur_steps.min().item()
+                    info["life/reset_rate"] = (len(reset_indices) / batch_size)
 
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
@@ -516,19 +525,12 @@ def train(
             n_updates = len(epoch_losses)
             qp_cut_mean = avg_info.get("qp_cut/mean", 0)
             qp_cut_max = avg_info.get("qp_cut/max", 0)
-            print(
-                f"  step {step:5d}/{num_steps}"
-                f"  |  loss {avg_info.get('loss/total', 0):.4f}"
-                f"  progress {avg_info.get('loss/progress', 0):.4f}"
-                f"  qp {avg_info.get('loss/qp', 0):.4f}"
-                f"  effort {avg_info.get('loss/effort', 0):.4f}"
-                f"  |  upd={n_updates}"
-                f"  |  s: {mean_s:.2f} [{min_s:.2f},{max_s:.2f}]"
-                f"  |  γ: {mean_gamma:.3f} p95={p95_gamma:.3f}"
-                f"  max={max_gamma:.3f} lim={mean_gamma_limit:.3f} viol={viol_rate:.1%}"
-                f"  |  cut: {qp_cut_mean:.3f}/{qp_cut_max:.3f}"
-                f"  |  {elapsed:.1f}s"
-            )
+            print(f"Step {step:5d} | "
+                  f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ef:{avg_info.get('loss/effort',0):.4f}) | "
+                  f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f}) | "
+                  f"G: {mean_gamma:.2f}/{mean_gamma_limit:.2f} (max:{max_gamma:.2f}, p95:{p95_gamma:.2f}, v:{viol_rate:.2%})")
+            print(f"      Life: {info['life/avg']:.1f} ({info['life/min']:.0f}-{info['life/max']:.0f}) | "
+                  f"Reset: {info['life/reset_rate']:.1%} | {elapsed:.0f}s")
             history["step"].append(step)
             for k in history:
                 if k != "step" and k in avg_info:
