@@ -88,11 +88,15 @@ def _velocity_to_accel(
     # Translation: LQR (goal-reaching) + GNN offset
     pos = agent_states[..., :2]
     goal_pos = goal_states[..., :2]
-    v_current = agent_states[..., 2:4]
+    # Potential-based LQR: Conic-Quadratic hybrid normalization
+    dist = torch.norm(goal_states[..., :2] - agent_states[:, :, :2], dim=-1, keepdim=True)
+    unit_vec = (goal_states[..., :2] - agent_states[:, :, :2]) / (dist + 1e-6)
+    
+    # v_ref = unit_vec * min(v_max, K_pos * dist)
+    v_ref = unit_vec * torch.clamp(K_pos * dist, max=v_max)
+    v_ref = torch.clamp(v_ref, -v_max, v_max)  # Safety secondary clamp
 
-    v_ref = K_pos * (goal_pos - pos)
-    v_ref = torch.clamp(v_ref, -v_max, v_max)
-    v_target = v_ref + pi_scaled[..., :2]
+    v_target = v_ref + pi_scaled[:, :, :2]
 
     # Scale: PD toward s_max (expansion potential) + GNN offset
     s_current = scale_states[..., 0]
@@ -470,8 +474,12 @@ def train(
                 goal_pos_mb = mb_goal[:, :, :2]     # (mb, n, 2)
                 v_current_mb = mb_agent[:, :, 2:4]  # (mb, n, 2)
 
-                v_ref_mb = K_pos * (goal_pos_mb - agent_pos_mb)
+                # Potential-based LQR for training loss
+                dist_mb = torch.norm(goal_pos_mb - agent_pos_mb, dim=-1, keepdim=True)
+                unit_vec_mb = (goal_pos_mb - agent_pos_mb) / (dist_mb + 1e-6)
+                v_ref_mb = unit_vec_mb * torch.clamp(K_pos * dist_mb, max=v_max)
                 v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
+                
                 v_target_mb = v_ref_mb + pi_scaled[:, :, :2]  # (mb, n, 2) — has grad
 
                 v_target_flat = v_target_mb.reshape(-1, 2)           # (mb*n, 2)
