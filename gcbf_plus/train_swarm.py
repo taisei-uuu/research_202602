@@ -216,16 +216,15 @@ def train(
     print("=" * 60)
     t_start = time.time()
 
+    # Initialize environment once at the beginning
+    vec_env.reset(dev)
+
     for step in range(1, num_steps + 1):
 
         # ============================================================
         # PHASE 1: Vectorized data collection (no_grad)
         # ============================================================
-        vec_env.reset(dev)
-        goal_fixed = vec_env._goal_states.clone()
-        obs_fixed = vec_env._obstacle_states.clone()
-        obs_centers = vec_env._obstacle_centers.clone() if vec_env._obstacle_centers is not None else None
-        obs_half_sizes = vec_env._obstacle_half_sizes.clone() if vec_env._obstacle_half_sizes is not None else None
+        # (Reset is now handled batch-wise below)
 
         pool_agent = []
         pool_scale = []
@@ -239,8 +238,8 @@ def train(
                 pool_agent.append(vec_env._agent_states.clone())
                 pool_scale.append(vec_env._scale_states.clone())
                 pool_payload.append(vec_env._payload_states.clone())
-                pool_goal.append(goal_fixed.clone())
-                pool_obs.append(obs_fixed.clone())
+                pool_goal.append(vec_env._goal_states.clone())
+                pool_obs.append(vec_env._obstacle_states.clone())
                 # Collect LiDAR hits (B, n, nb, 2) - position only
                 nb = 32
                 lidar_hits_t = vec_env.get_lidar_hits(num_beams=nb)[..., :2]  # (B, n, nb, 2)
@@ -260,7 +259,7 @@ def train(
 
                 # Level 1+2: velocity → PD → acceleration (pre-clamped)
                 u_nom = _velocity_to_accel(
-                    pi_scaled, vec_env._agent_states, goal_fixed,
+                    pi_scaled, vec_env._agent_states, vec_env._goal_states,
                     vec_env._scale_states, K_pos, K_v, K_s, v_max,
                     s_max=s_max, u_max=u_max, mass=mass,
                 )
@@ -323,6 +322,13 @@ def train(
                 # Level 4: env.step distributes to drones
                 vec_env.step(u_qp)
 
+                # ── Individual Auto-Reset ──
+                # Check for goal, collision, or timeout per batch
+                done_masks = vec_env.get_done_masks()  # (B,) boolean
+                reset_indices = torch.where(done_masks)[0]
+                if len(reset_indices) > 0:
+                    vec_env.reset_at_indices(reset_indices)
+
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
         # ============================================================
@@ -330,7 +336,7 @@ def train(
         all_scale = torch.stack(pool_scale).reshape(N_pool, num_agents, 2)
         all_payload = torch.stack(pool_payload).reshape(N_pool, num_agents, 4)
         all_goal = torch.stack(pool_goal).reshape(N_pool, num_agents, 4)
-        all_obs_st = torch.stack(pool_obs).reshape(N_pool, n_obs, 4)
+        all_obs_st = torch.stack(pool_obs).reshape(N_pool, -1, 4)
 
         all_obs_hits = torch.stack(pool_obs_hits).reshape(N_pool, num_agents, -1, 2)  # (N_pool, n, nb, 2)
 

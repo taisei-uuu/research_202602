@@ -103,7 +103,7 @@ class VectorizedSwarmEnv:
         self._obstacle_states: Optional[torch.Tensor] = None
         self._payload_states: Optional[torch.Tensor] = None  # (B, n, 4)
         self._last_lidar_hits: Optional[torch.Tensor] = None # (B, n, n_beams, 4) [px, py, vx, vy]
-        self._step_count = 0
+        self._step_counts: Optional[torch.Tensor] = None    # (B,) step count per batch
 
     @property
     def state_dim(self) -> int:
@@ -206,6 +206,7 @@ class VectorizedSwarmEnv:
         self._scale_states = torch.zeros(B, n, 2, dtype=torch.float32, device=device)
         self._scale_states[:, :, 0] = 1.0  # s = 1.0
         self._payload_states = torch.zeros(B, n, 4, dtype=torch.float32, device=device)
+        self._step_counts = torch.zeros(B, dtype=torch.long, device=device)
         self._K = self._K.to(device)
 
     def _sample_free_pos(self, rng, count, margin, batch_idx):
@@ -235,6 +236,62 @@ class VectorizedSwarmEnv:
             if ok:
                 positions.append(p)
         return np.array(positions)
+
+    def reset_at_indices(self, indices: torch.Tensor, seed: Optional[int] = None):
+        """Reset only specific batches (indices) within the vectorized environment."""
+        if len(indices) == 0:
+            return
+        
+        device = self._agent_states.device
+        B_sub = len(indices)
+        n = self.num_agents
+        area = self.area_size
+        r_init = self.params["R_form"] * 1.0 + self.params["r_margin"]
+        margin = r_init + 0.1
+        n_obs = self.params["n_obs"]
+        obs_lo, obs_hi = self.params.get("obs_len_range", (0.1, 0.3))
+        
+        # Use a new RNG for these sub-batches
+        rng = np.random.default_rng(seed)
+
+        # 1. Update obstacles for these indices
+        if n_obs > 0:
+            sub_cx = rng.uniform(margin, area - margin, size=(B_sub, n_obs))
+            sub_cy = rng.uniform(margin, area - margin, size=(B_sub, n_obs))
+            sub_hw = rng.uniform(obs_lo, obs_hi, size=(B_sub, n_obs)) / 2.0
+            sub_hh = rng.uniform(obs_lo, obs_hi, size=(B_sub, n_obs)) / 2.0
+            
+            self._obstacle_centers[indices] = torch.tensor(
+                np.stack([sub_cx, sub_cy], axis=-1), dtype=torch.float32, device=device
+            )
+            self._obstacle_half_sizes[indices] = torch.tensor(
+                np.stack([sub_hw, sub_hh], axis=-1), dtype=torch.float32, device=device
+            )
+            obs_4d = np.zeros((B_sub, n_obs, 4), dtype=np.float32)
+            obs_4d[:, :, 0] = sub_cx
+            obs_4d[:, :, 1] = sub_cy
+            self._obstacle_states[indices] = torch.tensor(obs_4d, dtype=torch.float32, device=device)
+
+        # 2. Update agent and goal positions for these indices
+        sub_start = np.empty((B_sub, n, 2), dtype=np.float32)
+        sub_goal = np.empty((B_sub, n, 2), dtype=np.float32)
+        for i, b_idx in enumerate(indices.tolist()):
+            sub_start[i] = self._sample_free_pos(rng, n, margin, b_idx)
+            sub_goal[i] = self._sample_free_pos(rng, n, margin, b_idx)
+
+        agent_4d = np.concatenate([sub_start, np.zeros((B_sub, n, 2), dtype=np.float32)], axis=-1)
+        goal_4d = np.concatenate([sub_goal, np.zeros((B_sub, n, 2), dtype=np.float32)], axis=-1)
+
+        self._agent_states[indices] = torch.tensor(agent_4d, dtype=torch.float32, device=device)
+        self._goal_states[indices] = torch.tensor(goal_4d, dtype=torch.float32, device=device)
+        
+        # 3. Reset scale and payload states for these indices
+        self._scale_states[indices] = torch.zeros(B_sub, n, 2, dtype=torch.float32, device=device)
+        self._scale_states[indices, :, 0] = 1.0  # s = 1.0
+        self._payload_states[indices] = torch.zeros(B_sub, n, 4, dtype=torch.float32, device=device)
+        
+        # 4. Reset step counts for these indices
+        self._step_counts[indices] = 0
 
     # ── Step ──────────────────────────────────────────────────────────
     def step(self, action: torch.Tensor):
@@ -301,7 +358,7 @@ class VectorizedSwarmEnv:
         new_gy     = gy + new_gy_dot * dt
         self._payload_states = torch.stack([new_gx, new_gy, new_gx_dot, new_gy_dot], dim=-1)
 
-        self._step_count += 1
+        self._step_counts += 1
 
     # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
     def nominal_controller(self, v_target=None, s_dot_target=None):
@@ -452,6 +509,31 @@ class VectorizedSwarmEnv:
         
         self._last_lidar_hits = res
         return res
+
+    def get_done_masks(self) -> torch.Tensor:
+        """
+        Check terminal conditions for each batch.
+        Returns: (B,) boolean tensor.
+        """
+        B = self.batch_size
+        n = self.num_agents
+        
+        # 1. Collision Check
+        # unsafe_mask() gives (B, n), if ANY agent is unsafe, the whole batch is 'done' (failed)
+        collision = self.unsafe_mask().any(dim=1) # (B,)
+        
+        # 2. Goal Check
+        # Check if all agents in the batch are close to their goals
+        pos = self._agent_states[:, :, :2]
+        goal = self._goal_states[:, :, :2]
+        dist_to_goal = torch.norm(pos - goal, dim=-1) # (B, n)
+        is_goal = dist_to_goal < 0.2
+        all_goal = is_goal.all(dim=1) # (B,)
+        
+        # 3. Time Limit Check (動画に合わせて512step)
+        timeout = self._step_counts >= self.max_steps
+        
+        return collision | all_goal | timeout
 
     # ── Graph builder ─────────────────────────────────────────────────
     def build_batch_graph(self, agent_states=None, scale_states=None) -> GraphsTuple:
