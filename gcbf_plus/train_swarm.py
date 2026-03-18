@@ -232,6 +232,8 @@ def train(
         pool_agent = []
         pool_scale = []
         pool_payload = []
+        pool_goal = []
+        pool_obs = []
         pool_obs_hits = []  # LiDAR hit points pool
 
         with torch.no_grad():
