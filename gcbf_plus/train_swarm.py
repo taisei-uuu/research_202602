@@ -498,7 +498,7 @@ def train(
                 torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_grad_norm)
                 optim.step()
 
-                epoch_losses.append(info)
+                epoch_losses.append(batch_info)
 
         # ============================================================
         # Logging
