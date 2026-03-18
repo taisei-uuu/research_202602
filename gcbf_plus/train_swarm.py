@@ -86,17 +86,15 @@ def _velocity_to_accel(
     """
     # Level 1: target velocity
     # Translation: LQR (goal-reaching) + GNN offset
-    pos = agent_states[..., :2]
-    goal_pos = goal_states[..., :2]
-    # Potential-based LQR: Conic-Quadratic hybrid normalization
-    dist = torch.norm(goal_states[..., :2] - agent_states[:, :, :2], dim=-1, keepdim=True)
-    unit_vec = (goal_states[..., :2] - agent_states[:, :, :2]) / (dist + 1e-6)
+    dist = torch.norm(goal_pos - pos, dim=-1, keepdim=True)
+    unit_vec = (goal_pos - pos) / (dist + 1e-6)
+    v_current = agent_states[..., 2:4]
     
     # v_ref = unit_vec * min(v_max, K_pos * dist)
     v_ref = unit_vec * torch.clamp(K_pos * dist, max=v_max)
     v_ref = torch.clamp(v_ref, -v_max, v_max)  # Safety secondary clamp
 
-    v_target = v_ref + pi_scaled[:, :, :2]
+    v_target = v_ref + pi_scaled[..., :2]
 
     # Scale: PD toward s_max (expansion potential) + GNN offset
     s_current = scale_states[..., 0]
