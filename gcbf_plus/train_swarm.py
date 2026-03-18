@@ -161,7 +161,9 @@ def train(
         batch_size=batch_size,
         area_size=area_size,
         params={"n_obs": n_obs},
+        max_steps=512,  # 動画の長さに合わせる
     )
+    vec_env.reset(dev)
 
     # ---- Network (GNN outputs 3D velocity commands) ----
     policy_net = PolicyNetwork(
@@ -217,7 +219,6 @@ def train(
     t_start = time.time()
 
     # Initialize environment once at the beginning
-    vec_env.reset(dev)
     info = {
         "life/avg": 0.0, "life/min": 0.0, "life/max": 0.0, "life/reset_rate": 0.0
     }
@@ -235,6 +236,7 @@ def train(
         pool_goal = []
         pool_obs = []
         pool_obs_hits = []  # LiDAR hit points pool
+        reset_count = 0
 
         with torch.no_grad():
             for t in range(horizon):
@@ -331,15 +333,15 @@ def train(
                 reset_indices = torch.where(done_masks)[0]
                 if len(reset_indices) > 0:
                     vec_env.reset_at_indices(reset_indices)
+                    reset_count += len(reset_indices)
                 
-                # Tracking lifecycle for logging
+                # Tracking lifecycle for logging at the end of horizon
                 if t == horizon - 1:
-                    # Final step counts in this horizon
                     cur_steps = vec_env._step_counts.float()
                     info["life/avg"] = cur_steps.mean().item()
                     info["life/max"] = cur_steps.max().item()
                     info["life/min"] = cur_steps.min().item()
-                    info["life/reset_rate"] = (len(reset_indices) / batch_size)
+                    info["life/reset_rate"] = (reset_count / (batch_size * horizon))
 
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
