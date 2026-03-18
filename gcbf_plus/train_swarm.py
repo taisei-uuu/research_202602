@@ -334,16 +334,14 @@ def train(
                 if len(reset_indices) > 0:
                     vec_env.reset_at_indices(reset_indices)
                     reset_count += len(reset_indices)
-                print(f"DEBUG: _step_counts mean: {vec_env._step_counts.float().mean().item()}")
-                
-                # Tracking lifecycle for logging at the end of horizon
-                if t == horizon - 1:
-                    cur_steps = vec_env._step_counts.float()
-                    # print(f"DEBUG: cur_steps mean at end of loop: {cur_steps.mean().item()}")
-                    info["life/avg"] = cur_steps.mean().item()
-                    info["life/max"] = cur_steps.max().item()
-                    info["life/min"] = cur_steps.min().item()
-                    info["life/reset_rate"] = (reset_count / (batch_size * horizon))
+        
+        # Tracking lifecycle for logging (moved outside 't' loop for reliability)
+        with torch.no_grad():
+            cur_steps = vec_env._step_counts.float()
+            info["life/avg"] = cur_steps.mean().item()
+            info["life/max"] = cur_steps.max().item()
+            info["life/min"] = cur_steps.min().item()
+            info["life/reset_rate"] = (reset_count / (batch_size * horizon))
 
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
