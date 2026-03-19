@@ -65,6 +65,7 @@ def _velocity_to_accel(
     u_max: float = None,
     mass: float = 0.1,
     n_drones: int = 3,
+    use_payload: bool = True,
 ) -> torch.Tensor:
     """Level 1+2: GNN velocity commands → PD → nominal acceleration (pre-clamped).
 
@@ -115,12 +116,14 @@ def _velocity_to_accel(
         a_max_trans = n_drones * u_max / mass * 0.7   # 70% margin for translation
         a_max_scale = n_drones * u_max / mass * 0.3   # 30% margin for scale
         
-        # NEW: Payload-aware clamping
-        # The payload HOCBF strictly limits acceleration to ~0.4 m/s^2.
-        # If LQR requests more, QP intervenes massively (L_qp explodes),
-        # causing the GNN to learn an arbitrary bias to negate the LQR.
-        a_max_payload = 0.5
-        actual_a_max_t = min(a_max_trans, a_max_payload)
+        # Payload-aware clamping: when payload is active the HOCBF limits
+        # acceleration to ~0.5 m/s^2, so pre-clamp u_nom to avoid massive
+        # QP intervention that teaches the GNN a meaningless bias.
+        if use_payload:
+            a_max_payload = 0.5
+            actual_a_max_t = min(a_max_trans, a_max_payload)
+        else:
+            actual_a_max_t = a_max_trans
         
         clamped_trans = u_nom[..., :2].clamp(-actual_a_max_t, actual_a_max_t)
         clamped_scale = u_nom[..., 2:].clamp(-a_max_scale, a_max_scale)
@@ -148,6 +151,7 @@ def train(
     seed: int = 0,
     checkpoint_path: str = "affine_swarm_checkpoint.pt",
     device: str = "auto",
+    use_payload: bool = True,
 ) -> Dict[str, list]:
     """Train hierarchical velocity-command swarm policy."""
     torch.manual_seed(seed)
@@ -219,6 +223,7 @@ def train(
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
     print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_effort={coef_effort}  w_scale={w_scale}")
+    print(f"  use_payload={use_payload}")
     print("=" * 60)
     t_start = time.time()
 
@@ -270,7 +275,7 @@ def train(
                 u_nom = _velocity_to_accel(
                     pi_scaled, vec_env._agent_states, vec_env._goal_states,
                     vec_env._scale_states, K_pos, K_v, K_s, v_max,
-                    s_max=s_max, u_max=u_max, mass=mass,
+                    s_max=s_max, u_max=u_max, mass=mass, use_payload=use_payload,
                 )
 
                 # Level 3: QP solve
@@ -320,7 +325,7 @@ def train(
                     other_agent_s_dot=other_sd_flat,
                     R_form=R_form, r_margin=r_margin, mass=mass,
                     s_min=s_min, s_max=s_max,
-                    payload_states=ps_flat,
+                    payload_states=ps_flat if use_payload else None,
                     cable_length=cable_length, gravity=gravity,
                     gamma_min=gamma_min, gamma_max_full=gamma_max_full,
                     payload_damping=payload_damping,
@@ -407,7 +412,7 @@ def train(
                 u_nom = _velocity_to_accel(
                     pi_scaled, mb_agent, mb_goal,
                     mb_scale, K_pos, K_v, K_s, v_max,
-                    s_max=s_max, u_max=u_max, mass=mass,
+                    s_max=s_max, u_max=u_max, mass=mass, use_payload=use_payload,
                 )
                 u_nom_flat = u_nom.reshape(mb_size * num_agents, 3)
 
@@ -461,7 +466,7 @@ def train(
                         other_agent_s_dot=mb_other_sd_flat,
                         R_form=R_form, r_margin=r_margin, mass=mass,
                         s_min=s_min, s_max=s_max,
-                        payload_states=ps_f,
+                        payload_states=ps_f if use_payload else None,
                         cable_length=cable_length, gravity=gravity,
                         gamma_min=gamma_min, gamma_max_full=gamma_max_full,
                         payload_damping=payload_damping,
@@ -523,25 +528,29 @@ def train(
                 mean_s = all_s_vals.mean().item()
                 min_s = all_s_vals.min().item()
                 max_s = all_s_vals.max().item()
-                # Payload swing — dynamic violation check
-                gamma_abs = torch.sqrt(
-                    all_payload[:, :, 0]**2 + all_payload[:, :, 1]**2
-                )
-                max_gamma = gamma_abs.max().item()
-                mean_gamma = gamma_abs.mean().item()
-                p95_gamma = torch.quantile(gamma_abs.float(), 0.95).item()
-                t_sc = ((all_s_vals - s_min) / (s_max - s_min + 1e-8)).clamp(0.0, 1.0)
-                gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_sc
-                viol_rate = (gamma_abs > gamma_dyn).float().mean().item()
-                mean_gamma_limit = gamma_dyn.mean().item()
+                if use_payload:
+                    gamma_abs = torch.sqrt(
+                        all_payload[:, :, 0]**2 + all_payload[:, :, 1]**2
+                    )
+                    max_gamma = gamma_abs.max().item()
+                    mean_gamma = gamma_abs.mean().item()
+                    p95_gamma = torch.quantile(gamma_abs.float(), 0.95).item()
+                    t_sc = ((all_s_vals - s_min) / (s_max - s_min + 1e-8)).clamp(0.0, 1.0)
+                    gamma_dyn = gamma_min + (gamma_max_full - gamma_min) * t_sc
+                    viol_rate = (gamma_abs > gamma_dyn).float().mean().item()
+                    mean_gamma_limit = gamma_dyn.mean().item()
 
             n_updates = len(epoch_losses)
             qp_cut_mean = avg_info.get("qp_cut/mean", 0)
             qp_cut_max = avg_info.get("qp_cut/max", 0)
+            if use_payload:
+                payload_str = f" | G: {mean_gamma:.2f}/{mean_gamma_limit:.2f} (max:{max_gamma:.2f}, p95:{p95_gamma:.2f}, v:{viol_rate:.2%})"
+            else:
+                payload_str = " | G: (no payload)"
             print(f"Step {step:5d} | "
                   f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ef:{avg_info.get('loss/effort',0):.4f}) | "
-                  f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f}) | "
-                  f"G: {mean_gamma:.2f}/{mean_gamma_limit:.2f} (max:{max_gamma:.2f}, p95:{p95_gamma:.2f}, v:{viol_rate:.2%})")
+                  f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
+                  f"{payload_str}")
             print(f"      Life: {info.get('life/avg', 0.0):.1f} ({info.get('life/min', 0.0):.0f}-{info.get('life/max', 0.0):.0f}) | "
                   f"Reset: {info.get('life/reset_rate', 0.0):.1%} | {elapsed:.0f}s")
             history["step"].append(step)
@@ -578,6 +587,7 @@ def train(
             "v_max": v_max,
             "s_dot_max": s_dot_max,
             "architecture": "hierarchical_velocity_command",
+            "use_payload": use_payload,
         },
         "history": history,
     }
@@ -605,9 +615,12 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--no_payload", action="store_true", default=False,
+                        help="Disable payload dynamics and HOCBF constraint")
     args = parser.parse_args()
     a = vars(args)
     a["checkpoint_path"] = a.pop("checkpoint")
+    a["use_payload"] = not a.pop("no_payload")
     train(**a)
 
 

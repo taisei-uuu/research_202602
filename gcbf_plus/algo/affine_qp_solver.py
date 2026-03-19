@@ -88,6 +88,10 @@ def solve_affine_qp(
     device = u_nom.device
     X = u_nom.clone()  # Start from nominal
 
+    # alpha_sum / alpha_prod are used by both HOCBF (payload) and Scale CBF
+    alpha_sum = hocbf_alpha1 + hocbf_alpha2
+    alpha_prod = hocbf_alpha1 * hocbf_alpha2
+
     # Pre-compute HOCBF coefficients (constant across Dykstra iterations)
     has_hocbf = (payload_states is not None and s is not None)
     if has_hocbf:
@@ -99,8 +103,6 @@ def solve_affine_qp(
         l = cable_length
         g_val = gravity
         c_damp = payload_damping
-        a1 = hocbf_alpha1
-        a2 = hocbf_alpha2
 
         # -----------------------------------------------------------------
         # Dynamic γ_max(s) based on physical swarm radius:
@@ -109,10 +111,6 @@ def solve_affine_qp(
         ratio = (R_form * s) / l
         clamped_ratio = torch.clamp(ratio, 0.0, 0.95)
         gamma_dyn = torch.asin(clamped_ratio)
-
-        # Common HOCBF params
-        alpha_sum = a1 + a2
-        alpha_prod = a1 * a2
 
         # --- X-axis HOCBF ---
         h_x = gamma_dyn**2 - gx**2
