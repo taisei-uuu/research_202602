@@ -146,6 +146,8 @@ def train(
     coef_qp: float = 2.0,
     coef_effort: float = 0.3,
     w_scale: float = 2.0,
+    coef_arrival: float = 5.0,
+    arrival_radius: float = 0.3,
     max_grad_norm: float = 2.0,
     log_interval: int = 100,
     seed: int = 0,
@@ -223,6 +225,7 @@ def train(
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
     print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_effort={coef_effort}  w_scale={w_scale}")
+    print(f"  coef_arrival={coef_arrival}  arrival_radius={arrival_radius}m")
     print(f"  use_payload={use_payload}")
     print("=" * 60)
     t_start = time.time()
@@ -474,32 +477,38 @@ def train(
                     )
 
                 # ── Loss ──
-                # Compute v_target for L_progress (has grad through pi_scaled)
-                agent_pos_mb = mb_agent[:, :, :2]   # (mb, n, 2)
-                goal_pos_mb = mb_goal[:, :, :2]     # (mb, n, 2)
-                v_current_mb = mb_agent[:, :, 2:4]  # (mb, n, 2)
+                agent_pos_mb = mb_agent[:, :, :2].detach()   # (mb, n, 2)
+                goal_pos_mb = mb_goal[:, :, :2].detach()     # (mb, n, 2)
 
-                # Potential-based LQR for training loss
+                # v_target: has gradient through pi_scaled → GNN
                 dist_mb = torch.norm(goal_pos_mb - agent_pos_mb, dim=-1, keepdim=True)
                 unit_vec_mb = (goal_pos_mb - agent_pos_mb) / (dist_mb + 1e-6)
                 v_ref_mb = unit_vec_mb * torch.clamp(K_pos * dist_mb, max=v_max)
                 v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
-                
                 v_target_mb = v_ref_mb + pi_scaled[:, :, :2]  # (mb, n, 2) — has grad
 
-                v_target_flat = v_target_mb.reshape(-1, 2)           # (mb*n, 2)
-                goal_dir_flat = (goal_pos_mb - agent_pos_mb).reshape(-1, 2).detach()  # (mb*n, 2)
+                # One-step lookahead position (gradient flows through v_target → GNN)
+                dt = vec_env.dt
+                pos_next_mb = agent_pos_mb + v_target_mb * dt  # (mb, n, 2)
+
+                # Distance reduction: positive when approaching goal
+                dist_now = dist_mb.squeeze(-1)                                    # (mb, n) detached
+                dist_next = torch.norm(goal_pos_mb - pos_next_mb, dim=-1)        # (mb, n) has grad
+                dist_reduction_flat = (dist_now - dist_next).reshape(-1)         # (mb*n,)
+                dist_to_goal_flat = dist_now.reshape(-1).detach()                # (mb*n,) detached
 
                 loss, batch_info = compute_affine_loss(
                     pi_action=pi_agents.reshape(-1, 3),
                     u_nom=u_nom_flat,
                     u_qp=u_qp_flat,
-                    v_target=v_target_flat,
-                    goal_dir=goal_dir_flat,
+                    dist_reduction=dist_reduction_flat,
+                    dist_to_goal=dist_to_goal_flat,
                     coef_progress=coef_goal,
                     coef_qp=coef_qp,
                     coef_effort=coef_effort,
                     w_scale=w_scale,
+                    coef_arrival=coef_arrival,
+                    arrival_radius=arrival_radius,
                 )
                 # QP intervention tracking
                 qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
@@ -547,8 +556,9 @@ def train(
                 payload_str = f" | G: {mean_gamma:.2f}/{mean_gamma_limit:.2f} (max:{max_gamma:.2f}, p95:{p95_gamma:.2f}, v:{viol_rate:.2%})"
             else:
                 payload_str = " | G: (no payload)"
+            arrival_str = f"{avg_info.get('loss/arrival', 0.0):.4f}"
             print(f"Step {step:5d} | "
-                  f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ef:{avg_info.get('loss/effort',0):.4f}) | "
+                  f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ar:{arrival_str}, ef:{avg_info.get('loss/effort',0):.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
                   f"{payload_str}")
             print(f"      Life: {info.get('life/avg', 0.0):.1f} ({info.get('life/min', 0.0):.0f}-{info.get('life/max', 0.0):.0f}) | "
@@ -611,6 +621,10 @@ def main():
     parser.add_argument("--coef_qp", type=float, default=2.0)
     parser.add_argument("--coef_effort", type=float, default=0.3)
     parser.add_argument("--w_scale", type=float, default=2.0)
+    parser.add_argument("--coef_arrival", type=float, default=5.0,
+                        help="Arrival bonus coefficient (default 5.0)")
+    parser.add_argument("--arrival_radius", type=float, default=0.3,
+                        help="Goal-reached threshold in metres (default 0.3)")
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")

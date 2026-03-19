@@ -74,8 +74,10 @@ def load_trained_policy(checkpoint_path: str):
     print(f"    agents={cfg['num_agents']}  area={cfg['area_size']}  "
           f"n_obs={cfg['n_obs']}  dt={cfg['dt']}  comm_radius={cfg['comm_radius']}")
     arch = cfg.get("architecture", "unknown")
+    use_payload = cfg.get("use_payload", True)
     print(f"    architecture={arch}  R_form={cfg.get('R_form', 'N/A')}"
-          f"  s_min={cfg.get('s_min', 'N/A')}  s_max={cfg.get('s_max', 'N/A')}")
+          f"  s_min={cfg.get('s_min', 'N/A')}  s_max={cfg.get('s_max', 'N/A')}"
+          f"  use_payload={use_payload}")
     return policy_net, cfg
 
 
@@ -143,8 +145,9 @@ def run_simulation(
     edge_trajectories: List[np.ndarray] = []
     lidar_trajectories: List[List[np.ndarray]] = []
 
+    _use_payload = cfg.get("use_payload", True) if cfg else True
     trajectories.append(env.agent_states.detach().numpy().copy())
-    if hasattr(env, 'payload_states') and env.payload_states is not None:
+    if _use_payload and hasattr(env, 'payload_states') and env.payload_states is not None:
         payload_trajectories.append(env.payload_states.detach().numpy().copy())
     if hasattr(env, 'scale_states') and env.scale_states is not None:
         scale_trajectories.append(env.scale_states.detach().numpy().copy())
@@ -203,26 +206,24 @@ def run_simulation(
                 u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
                 # Pre-clamp to physically feasible range
+                _use_payload = cfg.get("use_payload", True) if cfg else True
                 _u_max = env.params.get("u_max")
                 if _u_max is not None:
                     _mass = env.params.get("mass", 0.1)
                     a_max_t = 3 * _u_max / _mass * 0.7
                     a_max_s = 3 * _u_max / _mass * 0.3
-                    
-                    # NEW: Payload-aware clamping
-                    # The payload HOCBF strictly limits acceleration to ~0.4 m/s^2.
-                    # If LQR asks for more, QP will intervene heavily and cause the GNN
-                    # to learn a constant bias. We manually cap translation acceleration here.
-                    a_max_payload = 0.5
-                    actual_a_max_t = min(a_max_t, a_max_payload)
-                    
+                    if _use_payload:
+                        a_max_payload = 0.5
+                        actual_a_max_t = min(a_max_t, a_max_payload)
+                    else:
+                        actual_a_max_t = a_max_t
                     u_nom[:, :2] = u_nom[:, :2].clamp(-actual_a_max_t, actual_a_max_t)
                     u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
                 # Level 3: QP
                 sc = env.scale_states[:, 0]
                 sd = env.scale_states[:, 1]
-                ps = env.payload_states
+                ps = env.payload_states if _use_payload else None
 
                 # Obstacle hits from LiDAR — always returns (num_agents, 32, 4)
                 nb = 32
@@ -281,7 +282,7 @@ def run_simulation(
 
         next_obs, info = env.step(u)
         trajectories.append(env.agent_states.detach().numpy().copy())
-        if hasattr(env, 'payload_states') and env.payload_states is not None:
+        if _use_payload and hasattr(env, 'payload_states') and env.payload_states is not None:
             payload_trajectories.append(env.payload_states.detach().numpy().copy())
         if hasattr(env, 'scale_states') and env.scale_states is not None:
             scale_trajectories.append(env.scale_states.detach().numpy().copy())
