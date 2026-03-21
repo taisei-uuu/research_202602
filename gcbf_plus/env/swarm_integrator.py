@@ -91,7 +91,7 @@ class SwarmIntegrator:
         "r_margin": 0.2,         # bounding circle margin (m)
         "comm_radius": 3.0,
         "n_obs": 2,
-        "obs_len_range": (1.0, 3.0),
+        "obs_len_range": (0.4, 1.0),
         "mass": 0.1,
         "u_max": 0.3,
         "v_max": 1.0,

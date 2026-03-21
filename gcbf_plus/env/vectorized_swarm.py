@@ -45,7 +45,7 @@ class VectorizedSwarmEnv:
         "r_margin": 0.2,         # bounding circle margin (m)
         "comm_radius": 3.0,
         "n_obs": 2,
-        "obs_len_range": (1.0, 3.0),
+        "obs_len_range": (0.4, 1.0),
         "mass": 0.1,
         "u_max": 0.3,
         "v_max": 1.0,
@@ -166,7 +166,7 @@ class VectorizedSwarmEnv:
         r_init = self.params["R_form"] * 1.0 + self.params["r_margin"]
         margin = r_init + 0.1
         n_obs = self.params["n_obs"]
-        obs_lo, obs_hi = self.params.get("obs_len_range", (0.1, 0.3))
+        obs_lo, obs_hi = self.params.get("obs_len_range", (0.4, 1.0))
         self._step_count = 0
 
         # Obstacles
@@ -249,7 +249,7 @@ class VectorizedSwarmEnv:
         r_init = self.params["R_form"] * 1.0 + self.params["r_margin"]
         margin = r_init + 0.1
         n_obs = self.params["n_obs"]
-        obs_lo, obs_hi = self.params.get("obs_len_range", (0.1, 0.3))
+        obs_lo, obs_hi = self.params.get("obs_len_range", (0.4, 1.0))
         
         # Use a new RNG for these sub-batches
         rng = np.random.default_rng(seed)
