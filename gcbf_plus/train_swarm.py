@@ -249,6 +249,9 @@ def train(
         pool_obs = []
         pool_obs_hits = []  # LiDAR hit points pool
         reset_count = 0
+        goal_count = 0
+        collision_count = 0
+        timeout_count = 0
 
         with torch.no_grad():
             for t in range(horizon):
@@ -340,10 +343,19 @@ def train(
                 vec_env.step(u_qp)
 
                 # ── Individual Auto-Reset ──
-                # Check for goal, collision, or timeout per batch
-                done_masks = vec_env.get_done_masks()  # (B,) boolean
+                # Compute breakdown: goal / collision / timeout
+                _pos = vec_env._agent_states[:, :, :2]
+                _goal = vec_env._goal_states[:, :, :2]
+                _dist = torch.norm(_pos - _goal, dim=-1)
+                _goal_mask = _dist.lt(0.2).all(dim=1)                    # (B,)
+                _col_mask = vec_env.unsafe_mask().any(dim=1)              # (B,)
+                _timeout_mask = vec_env._step_counts.ge(vec_env.max_steps)# (B,)
+                done_masks = _goal_mask | _col_mask | _timeout_mask
                 reset_indices = torch.where(done_masks)[0]
                 if len(reset_indices) > 0:
+                    goal_count      += _goal_mask[reset_indices].sum().item()
+                    collision_count += _col_mask[reset_indices].sum().item()
+                    timeout_count   += _timeout_mask[reset_indices].sum().item()
                     vec_env.reset_at_indices(reset_indices)
                     reset_count += len(reset_indices)
         
@@ -354,6 +366,9 @@ def train(
             info["life/max"] = cur_steps.max().item()
             info["life/min"] = cur_steps.min().item()
             info["life/reset_rate"] = (reset_count / (batch_size * horizon))
+            info["reset/goal"]      = goal_count
+            info["reset/collision"] = collision_count
+            info["reset/timeout"]   = timeout_count
 
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
@@ -561,8 +576,15 @@ def train(
                   f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ar:{arrival_str}, ef:{avg_info.get('loss/effort',0):.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
                   f"{payload_str}")
+            g_cnt = int(info.get("reset/goal", 0))
+            c_cnt = int(info.get("reset/collision", 0))
+            t_cnt = int(info.get("reset/timeout", 0))
+            total_resets = g_cnt + c_cnt + t_cnt or 1  # avoid div/0
             print(f"      Life: {info.get('life/avg', 0.0):.1f} ({info.get('life/min', 0.0):.0f}-{info.get('life/max', 0.0):.0f}) | "
-                  f"Reset: {info.get('life/reset_rate', 0.0):.1%} | {elapsed:.0f}s")
+                  f"Reset: {info.get('life/reset_rate', 0.0):.1%} "
+                  f"[Goal:{g_cnt}({g_cnt/total_resets:.0%}) "
+                  f"Col:{c_cnt}({c_cnt/total_resets:.0%}) "
+                  f"TO:{t_cnt}({t_cnt/total_resets:.0%})] | {elapsed:.0f}s")
             history["step"].append(step)
             for k in history:
                 if k != "step" and k in avg_info:
