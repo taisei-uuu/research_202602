@@ -1,0 +1,22 @@
+{
+  "_comment": "2 swarms crossing diagonally, obstacles flanking the path on both sides.",
+  "_arena": "15x15m",
+  "agents": [
+    [2.0,  2.0],
+    [13.0, 13.0],
+    [1.0,  7.5]
+  ],
+  "goals": [
+    [13.0, 13.0],
+    [2.0,  2.0],
+    [14.0, 7.5]
+  ],
+  "obstacles": [
+    {"center": [3.9,  5.6],  "half_size": [0.4, 0.4]},
+    {"center": [5.6,  3.9],  "half_size": [0.4, 0.4]},
+    {"center": [6.65, 8.35], "half_size": [0.4, 0.4]},
+    {"center": [8.35, 6.65], "half_size": [0.4, 0.4]},
+    {"center": [9.4,  11.1], "half_size": [0.4, 0.4]},
+    {"center": [11.1, 9.4],  "half_size": [0.4, 0.4]}
+  ]
+}

@@ -30,7 +30,10 @@ from matplotlib.patches import Polygon, Circle
 import numpy as np
 import torch
 
+import json
+
 from gcbf_plus.env import DoubleIntegrator, SwarmIntegrator
+from gcbf_plus.env.swarm_integrator import Obstacle
 from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.utils.swarm_graph import build_swarm_graph_from_states
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
@@ -56,6 +59,50 @@ def compute_triangle_vertices(com_x, com_y, theta, R_form):
     R = np.array([[c, -s], [s, c]])
     verts = local @ R.T + np.array([com_x, com_y])
     return verts
+
+
+def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> None:
+    """Override env state with hardcoded positions from a JSON scenario file.
+
+    Called after env.reset() so random state is replaced by the scenario.
+    JSON format:
+        {
+          "agents":    [[x0,y0], [x1,y1], ...],   # start positions
+          "goals":     [[x0,y0], [x1,y1], ...],   # goal positions
+          "obstacles": [{"center":[cx,cy], "half_size":[hw,hh]}, ...]
+        }
+    """
+    with open(scenario_path) as f:
+        sc = json.load(f)
+
+    n = env.num_agents
+
+    if "agents" in sc:
+        pos = torch.tensor(sc["agents"], dtype=torch.float32)  # (n, 2)
+        if pos.shape[0] != n:
+            print(f"  [scenario] WARNING: JSON has {pos.shape[0]} agents but env expects {n}. Using JSON count.")
+        env.agent_states = torch.zeros(pos.shape[0], 4, dtype=torch.float32)
+        env.agent_states[:, :2] = pos
+
+    if "goals" in sc:
+        pos = torch.tensor(sc["goals"], dtype=torch.float32)   # (n, 2)
+        env.goal_states = torch.zeros(pos.shape[0], 4, dtype=torch.float32)
+        env.goal_states[:, :2] = pos
+
+    if "obstacles" in sc:
+        env._obstacles = []
+        obs_states = []
+        for obs in sc["obstacles"]:
+            center    = torch.tensor(obs["center"],    dtype=torch.float32)
+            half_size = torch.tensor(obs["half_size"], dtype=torch.float32)
+            env._obstacles.append(Obstacle(center=center, half_size=half_size))
+            s4 = torch.zeros(4)
+            s4[:2] = center
+            obs_states.append(s4)
+        env._obstacle_states = torch.stack(obs_states) if obs_states else None
+
+    print(f"  [scenario] Loaded from: {scenario_path}")
+    print(f"    agents={len(sc.get('agents',[]))}  goals={len(sc.get('goals',[]))}  obstacles={len(sc.get('obstacles',[]))}")
 
 
 def load_trained_policy(checkpoint_path: str):
@@ -91,6 +138,7 @@ def run_simulation(
     checkpoint_path: Optional[str] = None,
     force_lqr: bool = False,
     swarm_lqr: bool = False,
+    scenario_path: Optional[str] = None,
 ):
     policy_net = None
     mode = "lqr"
@@ -138,6 +186,9 @@ def run_simulation(
         )
 
     env.reset(seed=seed)
+
+    if scenario_path is not None:
+        _apply_scenario(env, scenario_path)
 
     trajectories: List[np.ndarray] = []
     payload_trajectories: List[np.ndarray] = []
@@ -772,6 +823,8 @@ def main():
                         help="Run SwarmIntegrator with LQR only")
     parser.add_argument("--force_lqr", action="store_true",
                         help="Ignore trained policy, use LQR only")
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="Path to scenario JSON (hardcoded agent/goal/obstacle positions)")
 
     args = parser.parse_args()
 
@@ -786,6 +839,7 @@ def main():
         max_steps=args.max_steps, dt=args.dt, n_obs=args.n_obs,
         seed=args.seed, checkpoint_path=args.checkpoint,
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
+        scenario_path=args.scenario,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,
      is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj, lidar_traj) = result
