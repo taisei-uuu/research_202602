@@ -238,7 +238,7 @@ def run_simulation(
     lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
 
     goals = env.goal_states.detach().numpy().copy()
-    obstacle_info = [(obs.center.numpy().copy(), obs.half_size.numpy().copy())
+    obstacle_info = [(obs.center.numpy().copy(), float(obs.radius))
                      for obs in env._obstacles]
 
     # Hierarchical velocity-command config
@@ -418,15 +418,13 @@ def create_video(
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4, color="#adb5bd")
 
     # Obstacles
-    for center, half_size in obstacle_info:
-        rect = mpatches.FancyBboxPatch(
-            (center[0] - half_size[0], center[1] - half_size[1]),
-            2 * half_size[0], 2 * half_size[1],
-            boxstyle="round,pad=0.01",
+    for center, radius in obstacle_info:
+        circle = Circle(
+            (center[0], center[1]), radius,
             facecolor="#adb5bd", edgecolor="#6c757d",
             linewidth=1.2, alpha=0.65, zorder=5,
         )
-        ax.add_patch(rect)
+        ax.add_patch(circle)
 
     # Start markers
     starts = trajectories[0]
@@ -706,15 +704,13 @@ def plot_trajectories(
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4, color="#adb5bd")
 
     # Obstacles
-    for center, half_size in obstacle_info:
-        rect = mpatches.FancyBboxPatch(
-            (center[0] - half_size[0], center[1] - half_size[1]),
-            2 * half_size[0], 2 * half_size[1],
-            boxstyle="round,pad=0.01",
+    for center, radius in obstacle_info:
+        circle = Circle(
+            (center[0], center[1]), radius,
             facecolor="#adb5bd", edgecolor="#6c757d",
             linewidth=1.2, alpha=0.65, zorder=1,
         )
-        ax.add_patch(rect)
+        ax.add_patch(circle)
 
     # Trajectories
     for i in range(n_agents):
