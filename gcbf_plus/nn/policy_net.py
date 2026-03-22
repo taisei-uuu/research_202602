@@ -83,7 +83,8 @@ class PolicyNetwork(nn.Module):
         """
         out = self.gnn_layers[0](graph)  # (N, action_dim)
 
-        # Extract only agent nodes
-        u = out[: self.n_agents]  # (n_agents, action_dim)
+        # Extract only agent nodes (use graph node_type to handle variable agent counts)
+        agent_mask = graph.node_type == self.AGENT_TYPE
+        u = out[agent_mask]  # (n_agents_actual, action_dim)
         return torch.tanh(u)
 
