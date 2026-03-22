@@ -212,6 +212,7 @@ def run_simulation(
         sc_area = _apply_scenario(env, scenario_path)
         if sc_area is not None:
             area_size = sc_area
+        num_agents = env.num_agents  # update in case scenario changed agent count
 
     trajectories: List[np.ndarray] = []
     payload_trajectories: List[np.ndarray] = []
