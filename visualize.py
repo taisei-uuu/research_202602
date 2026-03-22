@@ -61,19 +61,31 @@ def compute_triangle_vertices(com_x, com_y, theta, R_form):
     return verts
 
 
-def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> None:
+def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> Optional[float]:
     """Override env state with hardcoded positions from a JSON scenario file.
 
     Called after env.reset() so random state is replaced by the scenario.
     JSON format:
         {
+          "_arena":    "7.5x7.5m",                 # optional: overrides area_size
           "agents":    [[x0,y0], [x1,y1], ...],   # start positions
           "goals":     [[x0,y0], [x1,y1], ...],   # goal positions
           "obstacles": [{"center":[cx,cy], "half_size":[hw,hh]}, ...]
         }
+
+    Returns the area_size parsed from "_arena" if present, else None.
     """
     with open(scenario_path) as f:
         sc = json.load(f)
+
+    # Parse _arena field (e.g. "7.5x7.5m" → 7.5)
+    scenario_area: Optional[float] = None
+    if "_arena" in sc:
+        try:
+            scenario_area = float(sc["_arena"].split("x")[0])
+            env.area_size = scenario_area
+        except (ValueError, IndexError):
+            pass
 
     n = env.num_agents
 
@@ -103,6 +115,9 @@ def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> None:
 
     print(f"  [scenario] Loaded from: {scenario_path}")
     print(f"    agents={len(sc.get('agents',[]))}  goals={len(sc.get('goals',[]))}  obstacles={len(sc.get('obstacles',[]))}")
+    if scenario_area is not None:
+        print(f"    area_size overridden → {scenario_area}")
+    return scenario_area
 
 
 def load_trained_policy(checkpoint_path: str):
@@ -188,7 +203,9 @@ def run_simulation(
     env.reset(seed=seed)
 
     if scenario_path is not None:
-        _apply_scenario(env, scenario_path)
+        sc_area = _apply_scenario(env, scenario_path)
+        if sc_area is not None:
+            area_size = sc_area
 
     trajectories: List[np.ndarray] = []
     payload_trajectories: List[np.ndarray] = []
