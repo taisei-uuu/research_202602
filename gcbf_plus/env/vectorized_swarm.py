@@ -169,25 +169,23 @@ class VectorizedSwarmEnv:
         obs_lo, obs_hi = self.params.get("obs_len_range", (0.4, 1.0))
         self._step_count = 0
 
-        # Obstacles
+        # Obstacles (circular)
         if n_obs > 0:
             obs_cx = rng.uniform(margin, area - margin, size=(B, n_obs))
             obs_cy = rng.uniform(margin, area - margin, size=(B, n_obs))
-            obs_hw = rng.uniform(obs_lo, obs_hi, size=(B, n_obs)) / 2.0
-            obs_hh = rng.uniform(obs_lo, obs_hi, size=(B, n_obs)) / 2.0
+            obs_r  = rng.uniform(obs_lo, obs_hi, size=(B, n_obs)) / 2.0
             self._obstacle_centers = torch.tensor(
                 np.stack([obs_cx, obs_cy], axis=-1), dtype=torch.float32, device=device
             )
-            self._obstacle_half_sizes = torch.tensor(
-                np.stack([obs_hw, obs_hh], axis=-1), dtype=torch.float32, device=device
-            )
+            self._obstacle_radii = torch.tensor(obs_r, dtype=torch.float32, device=device)
             obs_4d = np.zeros((B, n_obs, 4), dtype=np.float32)
             obs_4d[:, :, 0] = obs_cx
             obs_4d[:, :, 1] = obs_cy
+            obs_4d[:, :, 2] = obs_r
             self._obstacle_states = torch.tensor(obs_4d, dtype=torch.float32, device=device)
         else:
             self._obstacle_centers = None
-            self._obstacle_half_sizes = None
+            self._obstacle_radii = None
             self._obstacle_states = torch.zeros(B, 0, 4, dtype=torch.float32, device=device)
 
         # Agent and goal positions
@@ -222,9 +220,9 @@ class VectorizedSwarmEnv:
             ok = True
             if self._obstacle_centers is not None:
                 oc = self._obstacle_centers[batch_idx].cpu().numpy()
-                ohs = self._obstacle_half_sizes[batch_idx].cpu().numpy() + margin
+                or_ = self._obstacle_radii[batch_idx].cpu().numpy()
                 for j in range(oc.shape[0]):
-                    if abs(p[0] - oc[j, 0]) < ohs[j, 0] and abs(p[1] - oc[j, 1]) < ohs[j, 1]:
+                    if np.linalg.norm(p - oc[j]) < or_[j] + margin:
                         ok = False
                         break
             if not ok:
@@ -258,18 +256,16 @@ class VectorizedSwarmEnv:
         if n_obs > 0:
             sub_cx = rng.uniform(margin, area - margin, size=(B_sub, n_obs))
             sub_cy = rng.uniform(margin, area - margin, size=(B_sub, n_obs))
-            sub_hw = rng.uniform(obs_lo, obs_hi, size=(B_sub, n_obs)) / 2.0
-            sub_hh = rng.uniform(obs_lo, obs_hi, size=(B_sub, n_obs)) / 2.0
-            
+            sub_r  = rng.uniform(obs_lo, obs_hi, size=(B_sub, n_obs)) / 2.0
+
             self._obstacle_centers[indices] = torch.tensor(
                 np.stack([sub_cx, sub_cy], axis=-1), dtype=torch.float32, device=device
             )
-            self._obstacle_half_sizes[indices] = torch.tensor(
-                np.stack([sub_hw, sub_hh], axis=-1), dtype=torch.float32, device=device
-            )
+            self._obstacle_radii[indices] = torch.tensor(sub_r, dtype=torch.float32, device=device)
             obs_4d = np.zeros((B_sub, n_obs, 4), dtype=np.float32)
             obs_4d[:, :, 0] = sub_cx
             obs_4d[:, :, 1] = sub_cy
+            obs_4d[:, :, 2] = sub_r
             self._obstacle_states[indices] = torch.tensor(obs_4d, dtype=torch.float32, device=device)
 
         # 2. Update agent and goal positions for these indices
@@ -430,83 +426,81 @@ class VectorizedSwarmEnv:
 
         obs_collision = torch.zeros(B, n, dtype=torch.bool, device=device)
         if self._obstacle_centers is not None and self._obstacle_centers.shape[1] > 0:
-            n_obs = self._obstacle_centers.shape[1]
-            dp = pos.unsqueeze(2)                                        # (B, n, 1, 2)
-            oc = self._obstacle_centers.unsqueeze(1)                     # (B, 1, n_obs, 2)
-            # Per-agent radius: r (B, n) → (B, n, 1)
+            dp = pos.unsqueeze(2) - self._obstacle_centers.unsqueeze(1) # (B, n, n_obs, 2)
+            dist = torch.norm(dp, dim=-1)                                # (B, n, n_obs)
             r_exp = r.unsqueeze(2)                                       # (B, n, 1)
-            ohs_base = self._obstacle_half_sizes.unsqueeze(1)            # (B, 1, n_obs, 2)
-            diff_obs = torch.abs(dp - oc)                                # (B, n, n_obs, 2)
-            inside = (diff_obs[..., 0] < (ohs_base[..., 0] + r_exp)) & \
-                     (diff_obs[..., 1] < (ohs_base[..., 1] + r_exp))
+            r_obs = self._obstacle_radii.unsqueeze(1)                    # (B, 1, n_obs)
+            inside = dist < (r_exp + r_obs)
             obs_collision = inside.any(dim=-1)  # (B, n)
 
         return agent_collision | obs_collision
 
     def get_lidar_hits(self, num_beams: int = 32) -> torch.Tensor:
         """
-        Vectorized LiDAR sensing against AABB obstacles.
+        Vectorized LiDAR sensing against circular obstacles.
         Returns: (B, n, num_beams, 4) [px, py, vx, vy] hit points.
         Points that don't hit anything are set to a very far distance.
         """
         B = self.batch_size
         n = self.num_agents
         device = self._agent_states.device
-        
-        pos = self._agent_states[:, :, :2] # (B, n, 2)
-        s = self._scale_states[:, :, 0]    # (B, n)
-        sensing_radius = (self.comm_radius * s).unsqueeze(-1) # (B, n, 1)
+
+        pos = self._agent_states[:, :, :2]  # (B, n, 2)
+        s = self._scale_states[:, :, 0]     # (B, n)
+        sensing_radius = (self.comm_radius * s).unsqueeze(-1)  # (B, n, 1)
 
         # 1. Setup beams
         angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
-        dir = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1) # (num_beams, 2)
-        
-        # Ray starts (B, n, 1, 2), Ray ends (B, n, num_beams, 2)
-        p0 = pos.unsqueeze(2)
-        p1 = p0 + sensing_radius.unsqueeze(-1) * dir.view(1, 1, num_beams, 2)
-        
-        # 2. AABB Ray-Intersection (vectorized over B, n, beams, n_obs)
-        # obs_c: (B, 1, 1, n_obs, 2), obs_hs: (B, 1, 1, n_obs, 2)
+        dir_ = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # (nb, 2)
+
+        # Ray: p0 (B, n, 1, 2), p1 (B, n, nb, 2), D = p1 - p0
+        p0 = pos.unsqueeze(2)  # (B, n, 1, 2)
+        p1 = p0 + sensing_radius.unsqueeze(-1) * dir_.view(1, 1, num_beams, 2)
+        D = p1 - p0  # (B, n, nb, 2)
+
         if self._obstacle_centers is None or self._obstacle_centers.shape[1] == 0:
             hits = torch.full((B, n, num_beams, 4), 1e6, device=device)
             self._last_lidar_hits = hits
             return hits
 
         n_obs = self._obstacle_centers.shape[1]
-        oc = self._obstacle_centers.view(B, 1, 1, n_obs, 2)
-        ohs = self._obstacle_half_sizes.view(B, 1, 1, n_obs, 2)
-        
-        # Ray direction D = P1 - P0
-        D = (p1 - p0).unsqueeze(3) # (B, n, n_beams, 1, 2)
-        p0_exp = p0.unsqueeze(3)    # (B, n, 1, 1, 2) 
-        
-        p_min = oc - ohs
-        p_max = oc + ohs
-        
-        eps = 1e-8
-        t_low = (p_min - p0_exp) / (D + eps)
-        t_high = (p_max - p0_exp) / (D + eps)
-        
-        t_near = torch.max(torch.min(t_low, t_high), dim=-1).values # (B, n, n_beams, n_obs)
-        t_far = torch.min(torch.max(t_low, t_high), dim=-1).values  # (B, n, n_beams, n_obs)
-        
-        # Valid hit conditions: t_near <= t_far and t_far >= 0 and 0 <= t_near <= 1
-        valid = (t_near <= t_far) & (t_far >= 0.0) & (t_near >= 0.0) & (t_near <= 1.0)
-        t_near = torch.where(valid, t_near, torch.tensor(1.1, device=device))
-        
-        # Find closest hit among all obstacles for each beam
-        min_t, _ = torch.min(t_near, dim=-1) # (B, n, n_beams)
+
+        # 2. Ray-Circle Intersection (vectorized over B, n, beams, n_obs)
+        # f = p0 - center: (B, n, 1, n_obs, 2)
+        oc = self._obstacle_centers.view(B, 1, 1, n_obs, 2)   # (B, 1, 1, n_obs, 2)
+        or_ = self._obstacle_radii.view(B, 1, 1, n_obs)        # (B, 1, 1, n_obs)
+        f = p0.unsqueeze(3) - oc                               # (B, n, 1, n_obs, 2)
+        D_exp = D.unsqueeze(3)                                 # (B, n, nb, 1, 2)
+
+        a = (D_exp * D_exp).sum(dim=-1)      # (B, n, nb, n_obs)
+        b = 2.0 * (f * D_exp).sum(dim=-1)   # (B, n, nb, n_obs)  — f broadcast over nb
+        # f needs broadcasting: (B, n, 1, n_obs, 2) with D_exp (B, n, nb, 1, 2)
+        f_exp = p0.unsqueeze(3).expand(B, n, num_beams, n_obs, 2) - oc.expand(B, n, num_beams, n_obs, 2)
+        b = 2.0 * (f_exp * D_exp).sum(dim=-1)
+        c = (f_exp * f_exp).sum(dim=-1) - or_ ** 2            # (B, n, nb, n_obs)
+
+        disc = b * b - 4.0 * a * c                            # (B, n, nb, n_obs)
+        valid_disc = disc >= 0.0
+
+        sqrt_disc = torch.sqrt(torch.clamp(disc, min=0.0))
+        t1 = (-b - sqrt_disc) / (2.0 * a + 1e-8)              # nearest intersection
+        t2 = (-b + sqrt_disc) / (2.0 * a + 1e-8)
+
+        # Use t1 (nearest), fall back to t2 if t1 < 0, mark invalid if neither in [0,1]
+        t = torch.where(t1 >= 0.0, t1, t2)
+        valid = valid_disc & (t >= 0.0) & (t <= 1.0)
+        t = torch.where(valid, t, torch.full_like(t, 1.1))
+
+        # Closest obstacle per beam
+        min_t, _ = torch.min(t, dim=-1)     # (B, n, nb)
         hit_mask = min_t <= 1.0
-        
-        # Final hit points
-        hit_pos = p0 + min_t.unsqueeze(-1) * (p1 - p0)
-        
-        # Assemble (B, n, n_beams, 4) [px, py, 0, 0]
-        res = torch.zeros((B, n, num_beams, 4), device=device)
-        res[..., :2] = hit_pos
-        # Only keep hits that actually occurred, else set to far away to ignore in GNN
-        res[~hit_mask] = 1e6
-        
+
+        # Hit positions
+        hit_pos = p0 + min_t.unsqueeze(-1) * D  # (B, n, nb, 2)
+
+        res = torch.full((B, n, num_beams, 4), 1e6, device=device)
+        res[hit_mask, :2] = hit_pos[hit_mask]
+
         self._last_lidar_hits = res
         return res
 

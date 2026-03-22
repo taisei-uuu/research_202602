@@ -95,6 +95,11 @@ def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> Optional[float]
             print(f"  [scenario] WARNING: JSON has {pos.shape[0]} agents but env expects {n}. Using JSON count.")
         env.agent_states = torch.zeros(pos.shape[0], 4, dtype=torch.float32)
         env.agent_states[:, :2] = pos
+        # Sync num_agents and resize dependent states to match new agent count
+        new_n = pos.shape[0]
+        env.num_agents = new_n
+        env.scale_states = torch.tensor([[1.0, 0.0]] * new_n, dtype=torch.float32)
+        env.payload_states = torch.zeros(new_n, 4, dtype=torch.float32)
 
     if "goals" in sc:
         pos = torch.tensor(sc["goals"], dtype=torch.float32)   # (n, 2)
@@ -105,11 +110,12 @@ def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> Optional[float]
         env._obstacles = []
         obs_states = []
         for obs in sc["obstacles"]:
-            center    = torch.tensor(obs["center"],    dtype=torch.float32)
-            half_size = torch.tensor(obs["half_size"], dtype=torch.float32)
-            env._obstacles.append(Obstacle(center=center, half_size=half_size))
+            center = torch.tensor(obs["center"], dtype=torch.float32)
+            radius = float(obs["radius"])
+            env._obstacles.append(Obstacle(center=center, radius=radius))
             s4 = torch.zeros(4)
             s4[:2] = center
+            s4[2] = radius
             obs_states.append(s4)
         env._obstacle_states = torch.stack(obs_states) if obs_states else None
 

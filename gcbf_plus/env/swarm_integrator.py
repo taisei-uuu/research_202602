@@ -31,35 +31,32 @@ from ..utils.swarm_graph import build_swarm_graph_from_states
 @dataclass
 class Obstacle:
     center: torch.Tensor   # (2,)
-    half_size: torch.Tensor  # (2,)
+    radius: float          # circle radius (m)
 
     def ray_intersection(self, start: torch.Tensor, end: torch.Tensor) -> Optional[torch.Tensor]:
         """
-        Compute the intersection of a ray (start -> end) with this AABB.
+        Compute the intersection of a ray (start -> end) with this circle.
         Returns the closest hit point (tensor(2,)) or None if no intersection in [0, 1].
         """
-        # Direction vector
-        d = end - start
-        
-        # AABB bounds
-        p_min = self.center - self.half_size
-        p_max = self.center + self.half_size
-        
-        # Avoid division by zero
-        eps = 1e-8
-        t_low = (p_min - start) / (d + eps)
-        t_high = (p_max - start) / (d + eps)
-        
-        t1 = torch.min(t_low, t_high)
-        t2 = torch.max(t_low, t_high)
-        
-        t_near = torch.max(t1)
-        t_far = torch.min(t2)
-        
-        # Intersection exists if t_near <= t_far and it is within the line segment [0, 1]
-        if t_near <= t_far and t_far >= 0:
-            if 0 <= t_near <= 1:
-                return start + t_near * d
+        d = end - start          # direction vector
+        f = start - self.center  # vector from center to ray start
+
+        a = (d * d).sum()
+        b = 2.0 * (f * d).sum()
+        c = (f * f).sum() - self.radius ** 2
+
+        discriminant = b * b - 4.0 * a * c
+        if discriminant < 0:
+            return None
+
+        sqrt_disc = discriminant.sqrt()
+        t1 = (-b - sqrt_disc) / (2.0 * a)
+        t2 = (-b + sqrt_disc) / (2.0 * a)
+
+        # Pick smallest t in [0, 1]
+        for t in (t1, t2):
+            if 0.0 <= t.item() <= 1.0:
+                return start + t * d
         return None
 
 
@@ -193,17 +190,16 @@ class SwarmIntegrator:
         margin = r_init + 0.1
         n_obs = self.params["n_obs"]
 
-        # Obstacles
+        # Obstacles (circular)
         self._obstacles = []
-        obs_lo, obs_hi = self.params.get("obs_len_range", (1.0, 3.0))
+        obs_lo, obs_hi = self.params.get("obs_len_range", (0.4, 1.0))
         for _ in range(n_obs):
             cx = rng.uniform(margin, area - margin)
             cy = rng.uniform(margin, area - margin)
-            hw = rng.uniform(obs_lo, obs_hi) / 2.0
-            hh = rng.uniform(obs_lo, obs_hi) / 2.0
+            r = float(rng.uniform(obs_lo, obs_hi) / 2.0)
             self._obstacles.append(Obstacle(
                 center=torch.tensor([cx, cy], dtype=torch.float32),
-                half_size=torch.tensor([hw, hh], dtype=torch.float32),
+                radius=r,
             ))
 
         obs_states = []
@@ -248,8 +244,7 @@ class SwarmIntegrator:
             ok = True
             for obs in self._obstacles:
                 oc = obs.center.numpy()
-                ohs = obs.half_size.numpy() + margin
-                if abs(p[0] - oc[0]) < ohs[0] and abs(p[1] - oc[1]) < ohs[1]:
+                if np.linalg.norm(p - oc) < obs.radius + margin:
                     ok = False
                     break
             if not ok:
@@ -397,14 +392,12 @@ class SwarmIntegrator:
             collision_matrix = dist < thresh
             agent_collision = collision_matrix.any(dim=1)
 
-        # Obstacle collision (using per-agent radius)
+        # Obstacle collision (circle: dist < r_swarm + r_obs)
         obs_collision = torch.zeros(n, dtype=torch.bool, device=device)
         for obs in self._obstacles:
             c = obs.center.to(device)
-            hs = obs.half_size.to(device)
-            # Expand half_size by per-agent radius
-            inside = (torch.abs(pos[:, 0] - c[0]) < (hs[0] + r)) & \
-                     (torch.abs(pos[:, 1] - c[1]) < (hs[1] + r))
+            dist = torch.norm(pos - c, dim=-1)  # (n,)
+            inside = dist < (r + obs.radius)
             obs_collision = obs_collision | inside
 
         return agent_collision | obs_collision
