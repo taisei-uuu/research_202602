@@ -1,5 +1,5 @@
 """
-Policy Network  π(x)  —  outputs bounded velocity commands per agent.
+Policy Network  π(x)  —  outputs bounded acceleration offsets per agent.
 
 Architecture (Table I):
     Encoder ψ₁ : [node_dim*2 + edge_dim → 256 → 256 → 128]
@@ -8,7 +8,8 @@ Architecture (Table I):
     Decoder ψ₄ : [128 → 256 → 256 → action_dim]
 
 Output is passed through tanh → values in [-1, 1].
-Caller scales by (v_max, v_max, s_dot_max) to get physical velocity commands.
+Caller scales by (a_max_gnn, a_max_gnn, a_max_gnn_s) to get physical acceleration offsets
+added directly to the nominal PD acceleration.
 """
 
 from __future__ import annotations

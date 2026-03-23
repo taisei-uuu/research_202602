@@ -242,42 +242,42 @@ def run_simulation(
     obstacle_info = [(obs.center.numpy().copy(), float(obs.radius))
                      for obs in env._obstacles]
 
-    # Hierarchical velocity-command config
+    # Control config
     v_max_cfg = cfg.get("v_max", 1.0) if cfg else 1.0
-    s_dot_max_cfg = cfg.get("s_dot_max", 1.0) if cfg else 1.0
     K_pos_cfg = cfg.get("K_pos", 0.5) if cfg else 0.5
     K_v_cfg = cfg.get("K_v", 2.0) if cfg else 2.0
     K_s_cfg = cfg.get("K_s", 2.0) if cfg else 2.0
+    # GNN acceleration output scale (must match train_swarm.py)
+    a_max_gnn = 1.0    # m/s²
+    a_max_gnn_s = 0.5  # s⁻²
 
     for step_idx in range(max_steps):
         if policy_net is not None:
             with torch.no_grad():
                 graph = env._get_graph()
-                # Level 1: GNN → tanh → scale to physical velocity
+                # GNN → tanh → scale to physical acceleration offset
                 pi_tanh = policy_net(graph)  # (n, 3) already tanh'd
                 pi_scaled = pi_tanh.clone()
-                pi_scaled[:, :2] *= v_max_cfg
-                pi_scaled[:, 2] *= s_dot_max_cfg
+                pi_scaled[:, :2] *= a_max_gnn
+                pi_scaled[:, 2] *= a_max_gnn_s
 
-                # Level 1+2: velocity → PD → acceleration
+                # PD nominal + GNN acceleration offset
                 pos = env.agent_states[:, :2]
                 goal_pos = env.goal_states[:, :2]
                 v_current = env.agent_states[:, 2:4]
                 s_current = env.scale_states[:, 0]
                 s_dot_current = env.scale_states[:, 1]
 
-                # Translation: LQR (goal-reaching) + GNN offset
+                # Translation: nominal PD + GNN acceleration offset
                 v_ref = K_pos_cfg * (goal_pos - pos)
                 v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
-                v_target = v_ref + pi_scaled[:, :2]
 
-                # Scale: PD toward s_max (expansion potential) + GNN offset
+                # Scale: PD toward s_max (expansion potential)
                 K_s_pos = 1.0
                 s_dot_ref = K_s_pos * (s_max - s_current)
-                s_dot_target = s_dot_ref + pi_scaled[:, 2]
 
-                a_trans = K_v_cfg * (v_target - v_current)
-                a_s = K_s_cfg * (s_dot_target - s_dot_current)
+                a_trans = K_v_cfg * (v_ref - v_current) + pi_scaled[:, :2]
+                a_s = K_s_cfg * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
                 u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
                 # Pre-clamp to physically feasible range

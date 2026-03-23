@@ -71,7 +71,7 @@ def _velocity_to_accel(
 
     Parameters
     ----------
-    pi_scaled : (..., 3) — (Δv_x, Δv_y, Δṡ) already in physical units.
+    pi_scaled : (..., 3) — (Δa_cx, Δa_cy, Δa_s) acceleration offsets in physical units.
     agent_states : (..., 4) — [px, py, vx, vy]
     goal_states : (..., 4) — [gx, gy, gvx, gvy]
     scale_states : (..., 2) — [s, s_dot]
@@ -97,17 +97,17 @@ def _velocity_to_accel(
     v_ref = unit_vec * torch.clamp(K_pos * dist, max=v_max)
     v_ref = torch.clamp(v_ref, -v_max, v_max)  # Safety secondary clamp
 
-    v_target = v_ref + pi_scaled[..., :2]
+    v_target = v_ref
 
-    # Scale: PD toward s_max (expansion potential) + GNN offset
+    # Scale: PD toward s_max (expansion potential)
     s_current = scale_states[..., 0]
     s_dot_current = scale_states[..., 1]
     s_dot_ref = K_s_pos * (s_max - s_current)  # "want to expand toward s_max"
-    s_dot_target = s_dot_ref + pi_scaled[..., 2]  # GNN can correct (e.g. contract)
+    s_dot_target = s_dot_ref
 
-    # Level 2: PD controller
-    a_trans = K_v * (v_target - v_current)
-    a_s = K_s * (s_dot_target - s_dot_current)
+    # Level 2: PD controller + GNN acceleration offset
+    a_trans = K_v * (v_target - v_current) + pi_scaled[..., :2]
+    a_s = K_s * (s_dot_target - s_dot_current) + pi_scaled[..., 2]
 
     u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
@@ -201,6 +201,10 @@ def train(
     K_v = vec_env.params.get("K_v", 2.0)
     K_s = vec_env.params.get("K_s", 2.0)
 
+    # GNN acceleration output scale: conservative (~1/3 of physical limit u_max/m = 3.0 m/s²)
+    a_max_gnn = 1.0    # m/s²  — translation acceleration offset
+    a_max_gnn_s = 0.5  # s⁻²  — scale acceleration offset
+
     # Payload / HOCBF constants
     cable_length = vec_env.params["cable_length"]
     gravity = vec_env.params["gravity"]
@@ -265,17 +269,17 @@ def train(
                 lidar_hits_t = vec_env.get_lidar_hits(num_beams=nb)[..., :2]  # (B, n, nb, 2)
                 pool_obs_hits.append(lidar_hits_t.clone())
 
-                # Level 1: GNN → tanh → scale to physical velocity
+                # GNN → tanh → scale to physical acceleration offset
                 mega = vec_env.build_batch_graph()
                 pi_raw = policy_net.gnn_layers[0](mega)  # no tanh yet (raw)
                 pi_tanh = torch.tanh(pi_raw)
                 pi_agents = extract_agent_outputs(pi_tanh, num_agents, N_per, batch_size)
                 pi_agents = pi_agents.reshape(batch_size, num_agents, 3)
 
-                # Scale to physical units: (Δv_x, Δv_y) * v_max, ṡ * s_dot_max
+                # Scale to physical units: (Δa_cx, Δa_cy) * a_max_gnn, Δa_s * a_max_gnn_s
                 pi_scaled = pi_agents.clone()
-                pi_scaled[:, :, :2] *= v_max
-                pi_scaled[:, :, 2] *= s_dot_max
+                pi_scaled[:, :, :2] *= a_max_gnn
+                pi_scaled[:, :, 2] *= a_max_gnn_s
 
                 # Level 1+2: velocity → PD → acceleration (pre-clamped)
                 u_nom = _velocity_to_accel(
@@ -416,15 +420,15 @@ def train(
                     edge_dim=vec_env.edge_dim,
                 )
 
-                # ── Level 1: GNN → tanh → scale ──
+                # ── GNN → tanh → scale to physical acceleration offset ──
                 pi_raw = policy_net.gnn_layers[0](mega)
                 pi_tanh = torch.tanh(pi_raw)
                 pi_agents = extract_agent_outputs(pi_tanh, num_agents, N_per, mb_size)
                 pi_agents = pi_agents.reshape(mb_size, num_agents, 3)
 
                 pi_scaled = pi_agents.clone()
-                pi_scaled[:, :, :2] = pi_scaled[:, :, :2] * v_max
-                pi_scaled[:, :, 2] = pi_scaled[:, :, 2] * s_dot_max
+                pi_scaled[:, :, :2] = pi_scaled[:, :, :2] * a_max_gnn
+                pi_scaled[:, :, 2] = pi_scaled[:, :, 2] * a_max_gnn_s
 
                 # ── Level 1+2: velocity → PD → acceleration (pre-clamped) ──
                 u_nom = _velocity_to_accel(
@@ -495,16 +499,17 @@ def train(
                 agent_pos_mb = mb_agent[:, :, :2].detach()   # (mb, n, 2)
                 goal_pos_mb = mb_goal[:, :, :2].detach()     # (mb, n, 2)
 
-                # v_target: has gradient through pi_scaled → GNN
+                # One-step lookahead: gradient flows through pi_scaled (accel offset) → GNN
                 dist_mb = torch.norm(goal_pos_mb - agent_pos_mb, dim=-1, keepdim=True)
                 unit_vec_mb = (goal_pos_mb - agent_pos_mb) / (dist_mb + 1e-6)
                 v_ref_mb = unit_vec_mb * torch.clamp(K_pos * dist_mb, max=v_max)
                 v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
-                v_target_mb = v_ref_mb + pi_scaled[:, :, :2]  # (mb, n, 2) — has grad
+                v_current_mb = mb_agent[:, :, 2:4].detach()
+                a_nom_mb = K_v * (v_ref_mb.detach() - v_current_mb)
+                a_total_mb = a_nom_mb + pi_scaled[:, :, :2]  # has grad through pi_scaled
 
-                # One-step lookahead position (gradient flows through v_target → GNN)
                 dt = vec_env.dt
-                pos_next_mb = agent_pos_mb + v_target_mb * dt  # (mb, n, 2)
+                pos_next_mb = agent_pos_mb + v_current_mb * dt + 0.5 * (a_total_mb / mass) * dt ** 2
 
                 # Distance reduction: positive when approaching goal
                 dist_now = dist_mb.squeeze(-1)                                    # (mb, n) detached
