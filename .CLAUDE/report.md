@@ -304,8 +304,9 @@ subject to:
 | (1) | ペイロード HOCBF（後述） | ソフト（スラック $\delta$） | $a_{cx}, a_{cy}$ |
 | (2) | スケール CBF 下限（後述） | ハード | $a_s$ |
 | (3) | スケール CBF 上限（後述） | ハード | $a_s$ |
-| (4) | 障害物 CBF（後述） | ハード | $a_{cx}, a_{cy}, a_s$ |
-| (5) | 入力飽和 $\|a_c\|_\infty \leq u_\text{max}$ | ハード | $a_{cx}, a_{cy}$ |
+| (4) | エージェント間衝突回避 CBF（後述） | ハード | $a_{cx}, a_{cy}, a_s$ |
+| (5) | 障害物 CBF（後述） | ハード | $a_{cx}, a_{cy}, a_s$ |
+| (6) | 入力飽和 $\|a_c\|_\infty \leq u_\text{max}$ | ハード | $a_{cx}, a_{cy}$ |
 
 スラック重み $p = 100.0$（大きいほどソフト制約を強力に施行）．
 
@@ -319,7 +320,25 @@ $$a_s \leq -(\alpha_1 + \alpha_2)\dot{s} + \alpha_1\alpha_2(s_\text{max} - s) \q
 
 $\alpha_1 = \alpha_2 = 2.0$（クラス $\mathcal{K}$ 関数の係数）．
 
-#### 制約 (4)：障害物 CBF（2次 HOCBF）
+#### 制約 (4)：エージェント間衝突回避 CBF（2次 HOCBF + Reciprocal CA）
+
+スワーム $i$ と他のスワーム $j$ に対して，動的バウンディングサークル同士の非重複条件をCBFとして定式化する：
+
+$$h_\text{agent}^{(j)} = \|p_i - p_j\|^2 - \left(r_\text{swarm}(s_i) + r_\text{swarm}(s_j)\right)^2$$
+
+安全距離 $d_\text{safe}^{(j)} = r_\text{swarm}(s_i) + r_\text{swarm}(s_j)$ はスケールに依存して動的に変化する（ここで $r_\text{swarm}(s) = R_\text{form} \cdot s + r_\text{margin}$）．
+
+$h_\text{agent}$ の1階・2階時間微分を展開した2次 HOCBF 条件に，**Reciprocal Collision Avoidance（RCA）**として右辺を $1/2$ スケールした形で課す：
+
+$$A_\text{agent}^{(j)} \cdot X + \frac{1}{2}\left(\ddot{h}_\text{drift}^{(j)} + (\alpha_1+\alpha_2)\dot{h}^{(j)} + \alpha_1\alpha_2\, h_\text{agent}^{(j)}\right) \geq 0$$
+
+$$A_\text{agent}^{(j)} = \left[2\Delta p_x^{(j)},\;\; 2\Delta p_y^{(j)},\;\; -2\,d_\text{safe}^{(j)}\, R_\text{form}\right] \in \mathbb{R}^{1\times 3}$$
+
+ここで $\Delta p^{(j)} = p_i - p_j$ (m)，$\alpha_1 = 0.8$，$\alpha_2 = 0.8$．
+
+RCA の $1/2$ 係数は「回避責任をエージェント $i$ と $j$ で折半する」という考え方に基づく．各エージェントが半分ずつ回避努力をすれば，合計で十分な回避が達成される．複数スワームが同時に存在する場合は，最も制約が厳しい相手（$c_\text{vals}$ が最小のペア）に対してのみ射影を適用する．
+
+#### 制約 (5)：障害物 CBF（2次 HOCBF）
 
 スワーム $i$ と障害物 LiDAR ヒット点 $p_\text{obs}^{(k)}$ に対して：
 
@@ -333,7 +352,7 @@ $$A_\text{obs}^{(k)} = \left[2\Delta p_x^{(k)},\;\; 2\Delta p_y^{(k)},\;\; -2\,r
 
 ここで $\Delta p^{(k)} = p_i - p_\text{obs}^{(k)}$ (m)，$\alpha_1 = 0.8$，$\alpha_2 = 0.8$．
 
-#### 制約 (1)：ペイロード揺れ角 HOCBF（動的 $\gamma_\text{max}(s)$）
+#### 制約 (1)：ペイロード揺れ角 HOCBF（動的 $\gamma_\text{max}(s)$，ソフト制約）
 
 揺れ角上限をスケールに応じて動的に設定する：
 
