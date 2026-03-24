@@ -10,11 +10,11 @@
     [1.0, 1.0]
   ],
   "obstacles": [
-    {"center": [1.60, 3.15], "radius": 0.2},
-    {"center": [3.15, 1.60], "radius": 0.2},
-    {"center": [2.98, 4.53], "radius": 0.2},
-    {"center": [4.53, 2.98], "radius": 0.2},
-    {"center": [4.35, 5.90], "radius": 0.2},
-    {"center": [5.90, 4.35], "radius": 0.2}
+    {"center": [1.74, 3.01], "radius": 0.2},
+    {"center": [3.01, 1.74], "radius": 0.2},
+    {"center": [2.91, 4.60], "radius": 0.2},
+    {"center": [4.60, 2.91], "radius": 0.2},
+    {"center": [4.49, 5.76], "radius": 0.2},
+    {"center": [5.76, 4.49], "radius": 0.2}
   ]
 }
