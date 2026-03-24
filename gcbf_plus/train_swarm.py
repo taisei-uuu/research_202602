@@ -51,7 +51,7 @@ def extract_agent_outputs(
     return full_output[idx.reshape(-1)]
 
 
-def _velocity_to_accel(
+def _nominal_accel(
     pi_scaled: torch.Tensor,
     agent_states: torch.Tensor,
     goal_states: torch.Tensor,
@@ -282,7 +282,7 @@ def train(
                 pi_scaled[:, :, 2] *= a_max_gnn_s
 
                 # Level 1+2: velocity → PD → acceleration (pre-clamped)
-                u_nom = _velocity_to_accel(
+                u_nom = _nominal_accel(
                     pi_scaled, vec_env._agent_states, vec_env._goal_states,
                     vec_env._scale_states, K_pos, K_v, K_s, v_max,
                     s_max=s_max, u_max=u_max, mass=mass, use_payload=use_payload,
@@ -431,7 +431,7 @@ def train(
                 pi_scaled[:, :, 2] = pi_scaled[:, :, 2] * a_max_gnn_s
 
                 # ── Level 1+2: velocity → PD → acceleration (pre-clamped) ──
-                u_nom = _velocity_to_accel(
+                u_nom = _nominal_accel(
                     pi_scaled, mb_agent, mb_goal,
                     mb_scale, K_pos, K_v, K_s, v_max,
                     s_max=s_max, u_max=u_max, mass=mass, use_payload=use_payload,
@@ -509,7 +509,7 @@ def train(
                 a_total_mb = a_nom_mb + pi_scaled[:, :, :2]  # has grad through pi_scaled
 
                 dt = vec_env.dt
-                pos_next_mb = agent_pos_mb + v_current_mb * dt + 0.5 * (a_total_mb / mass) * dt ** 2
+                pos_next_mb = agent_pos_mb + v_current_mb * dt + 0.5 * a_total_mb * dt ** 2
 
                 # Distance reduction: positive when approaching goal
                 dist_now = dist_mb.squeeze(-1)                                    # (mb, n) detached

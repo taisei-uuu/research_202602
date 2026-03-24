@@ -76,9 +76,9 @@ $$u_i = [a_{cx},\; a_{cy},\; a_s]^\top \in \mathbb{R}^3$$
 
 **並進ダイナミクス（Double Integrator）**：
 
-$$p_{t+1} = p_t + v_t \Delta t + \frac{1}{2} \frac{a_{c}}{m} \Delta t^2$$
+$$p_{t+1} = p_t + v_t \Delta t + \frac{1}{2} a_{c} \Delta t^2$$
 
-$$v_{t+1} = \text{clamp}\!\left(v_t + \frac{a_{c}}{m} \Delta t,\; -v_\text{max},\; v_\text{max}\right)$$
+$$v_{t+1} = \text{clamp}\!\left(v_t + a_{c} \Delta t,\; -v_\text{max},\; v_\text{max}\right)$$
 
 | パラメータ | 記号 | 値 | 単位 |
 |---|---|---|---|
@@ -130,7 +130,7 @@ $s=1.0$ のとき $r_\text{swarm} = 0.7$ m，$s_\text{min}=0.4$ のとき $0.4$ 
 |---|---|---|---|
 | タイムステップ | $\Delta t$ | 0.05 | s |
 | 環境サイズ | — | 15.0 × 15.0 | m |
-| 最大制御入力（並進） | $u_\text{max}$ | 0.3 | N（= kg·m/s²） |
+| 最大制御入力（並進） | $u_\text{max}$ | 0.3 | m/s² |
 | 通信半径 | $R_\text{comm}$ | 3.0 | m |
 | 障害物数 | $n_\text{obs}$ | 6 | — |
 | 最大エピソード長 | $T_\text{max}$ | 256 | ステップ |

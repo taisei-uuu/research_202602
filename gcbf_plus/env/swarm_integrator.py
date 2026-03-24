@@ -291,7 +291,7 @@ class SwarmIntegrator:
             a_trans = torch.clamp(a_trans, -u_max, u_max)
 
         # ── Translation dynamics (CoM) ──
-        accel = a_trans / m
+        accel = a_trans  # action is already acceleration (m/s²), consistent with vectorized_swarm
         new_pos = self.agent_states[:, :2] + self.agent_states[:, 2:4] * dt + 0.5 * accel * dt**2
         new_vel = self.agent_states[:, 2:4] + accel * dt
         if v_max is not None:

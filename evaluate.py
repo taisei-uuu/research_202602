@@ -77,23 +77,26 @@ class AffinePolicy(MethodController):
             K_v = cfg.get("K_v", 2.0)
             K_s = cfg.get("K_s", 2.0)
 
+            # GNN → tanh → scale to physical acceleration offset (must match train_swarm.py)
+            a_max_gnn = 1.0    # m/s²
+            a_max_gnn_s = 0.5  # s⁻²
             pi_scaled = pi_tanh.clone()
-            pi_scaled[:, :2] *= v_max_cfg
-            pi_scaled[:, 2] *= s_dot_max_cfg
+            pi_scaled[:, :2] *= a_max_gnn
+            pi_scaled[:, 2] *= a_max_gnn_s
 
-            # Level 1+2: velocity → PD → acceleration
+            # PD nominal + GNN acceleration offset
             pos = env.agent_states[:, :2]
             goal_pos = env.goal_states[:, :2]
             v_current = env.agent_states[:, 2:4]
+            s_current = env.scale_states[:, 0]
             s_dot_current = env.scale_states[:, 1]
 
             v_ref = K_pos * (goal_pos - pos)
             v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
-            v_target = v_ref + pi_scaled[:, :2]
-            s_dot_target = pi_scaled[:, 2]
+            s_dot_ref = 1.0 * (env.params.get("s_max", 1.5) - s_current)
 
-            a_trans = K_v * (v_target - v_current)
-            a_s = K_s * (s_dot_target - s_dot_current)
+            a_trans = K_v * (v_ref - v_current) + pi_scaled[:, :2]
+            a_s = K_s * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
             u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
             # Pre-clamp to physically feasible range

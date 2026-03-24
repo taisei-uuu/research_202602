@@ -32,6 +32,12 @@ import torch
 
 import json
 
+try:
+    import quadprog
+    _QUADPROG_AVAILABLE = True
+except ImportError:
+    _QUADPROG_AVAILABLE = False
+
 from gcbf_plus.env import DoubleIntegrator, SwarmIntegrator
 from gcbf_plus.env.swarm_integrator import Obstacle
 from gcbf_plus.nn import PolicyNetwork
@@ -149,6 +155,199 @@ def load_trained_policy(checkpoint_path: str):
     return policy_net, cfg
 
 
+def _solve_qp_exact_single(
+    u_nom_i,       # (3,) numpy float64
+    s_i, sd_i,     # float
+    obs_hits_i,    # (K, 2) numpy — valid (filtered) obstacle hit points, or None
+    agent_pos_i,   # (2,) numpy
+    agent_vel_i,   # (2,) numpy
+    other_pos,     # (M, 2) numpy or None
+    other_vel,     # (M, 2) numpy or None
+    other_s,       # (M,) numpy or None
+    other_sd,      # (M,) numpy or None
+    payload_i,     # (4,) numpy or None — [gx, gy, gx_dot, gy_dot]
+    R_form, r_margin, s_min, s_max,
+    alpha1_scale, alpha2_scale,
+    alpha1_obs, alpha2_obs,
+    hocbf_alpha1, hocbf_alpha2,
+    cable_length, gravity, payload_damping,
+    slack_weight, u_max,
+) -> np.ndarray:
+    """Solve per-agent QP exactly using quadprog.
+
+    Variable: X5 = [a_cx, a_cy, a_s, delta_x, delta_y]  (5D)
+    Objective: min 1/2 X5^T G X5 - a^T X5
+    where G = diag([1, 1, 1, p, p]),  a = [u_nom; 0; 0]
+
+    Returns: (3,) numpy array [a_cx, a_cy, a_s]
+    """
+    p = slack_weight
+    G = np.diag([1.0, 1.0, 1.0, p, p]) + np.eye(5) * 1e-8  # ensure positive definite
+    a_vec = np.array([u_nom_i[0], u_nom_i[1], u_nom_i[2], 0.0, 0.0], dtype=np.float64)
+
+    # Constraint rows: C^T @ X5 >= b  (each row is a constraint normal)
+    C_rows = []
+    b_vals = []
+
+    def add(row, b):
+        C_rows.append(np.array(row, dtype=np.float64))
+        b_vals.append(float(b))
+
+    # ── Scale CBF (2nd order HOCBF) ──────────────────────────────────
+    alpha_sum_s = alpha1_scale + alpha2_scale
+    alpha_prod_s = alpha1_scale * alpha2_scale
+    lb = -alpha_sum_s * sd_i - alpha_prod_s * (s_i - s_min)
+    ub = -alpha_sum_s * sd_i + alpha_prod_s * (s_max - s_i)
+    add([0, 0,  1, 0, 0],  lb)   # a_s >= lb
+    add([0, 0, -1, 0, 0], -ub)   # a_s <= ub
+
+    # ── Obstacle CBF (2nd order HOCBF) ───────────────────────────────
+    if obs_hits_i is not None and len(obs_hits_i) > 0:
+        a1, a2 = alpha1_obs, alpha2_obs
+        r_sw = R_form * s_i + r_margin
+        r_dot = R_form * sd_i
+        for obs_pt in obs_hits_i:
+            dp = agent_pos_i - obs_pt
+            dist_sq = float(np.dot(dp, dp))
+            h = dist_sq - r_sw ** 2
+            h_dot = 2.0 * float(np.dot(dp, agent_vel_i)) - 2.0 * r_sw * r_dot
+            h_ddot_drift = 2.0 * float(np.dot(agent_vel_i, agent_vel_i)) - 2.0 * r_dot ** 2
+            A_cx = 2.0 * dp[0]
+            A_cy = 2.0 * dp[1]
+            A_as = -2.0 * r_sw * R_form
+            rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h
+            add([A_cx, A_cy, A_as, 0, 0], -rhs)
+
+    # ── Agent-Agent CBF (2nd order HOCBF + Reciprocal CA) ────────────
+    if other_pos is not None and len(other_pos) > 0:
+        a1, a2 = alpha1_obs, alpha2_obs
+        r_sw = R_form * s_i + r_margin
+        for j in range(len(other_pos)):
+            r_other = R_form * float(other_s[j]) + r_margin
+            safe_dist = r_sw + r_other
+            dp = agent_pos_i - other_pos[j]
+            dv = agent_vel_i - other_vel[j]
+            dist_sq = float(np.dot(dp, dp))
+            h = dist_sq - safe_dist ** 2
+            r_dot_total = R_form * (sd_i + float(other_sd[j]))
+            h_dot = 2.0 * float(np.dot(dp, dv)) - 2.0 * safe_dist * r_dot_total
+            h_ddot_drift = 2.0 * float(np.dot(dv, dv)) - 2.0 * r_dot_total ** 2
+            A_cx = 2.0 * dp[0]
+            A_cy = 2.0 * dp[1]
+            A_as = -2.0 * safe_dist * R_form
+            rhs = (h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h) * 0.5  # RCA 1/2
+            add([A_cx, A_cy, A_as, 0, 0], -rhs)
+
+    # ── Payload HOCBF (soft, with slack delta) ────────────────────────
+    if payload_i is not None:
+        gx, gy, gx_dot, gy_dot = payload_i
+        l, g_val, c_damp = cable_length, gravity, payload_damping
+        a1, a2 = hocbf_alpha1, hocbf_alpha2
+        alpha_sum_h = a1 + a2
+        alpha_prod_h = a1 * a2
+
+        ratio = np.clip(R_form * s_i / l, 0.0, 0.95)
+        gamma_dyn = np.arcsin(ratio)
+
+        # X-axis: C_x * a_cx + rhs_x + delta_x >= 0
+        h_x = gamma_dyn ** 2 - gx ** 2
+        h_dot_x = -2.0 * gx * gx_dot
+        h_ddot_drift_x = (-2.0 * gx_dot ** 2
+                          + 2.0 * gx * g_val / l * np.sin(gx)
+                          + 2.0 * gx * c_damp * gx_dot)
+        C_x = (2.0 * gx * np.cos(gx)) / l
+        rhs_x = h_ddot_drift_x + alpha_sum_h * h_dot_x + alpha_prod_h * h_x
+        add([C_x, 0, 0, 1, 0], -rhs_x)
+
+        # Y-axis: C_y * a_cy + rhs_y + delta_y >= 0
+        h_y = gamma_dyn ** 2 - gy ** 2
+        h_dot_y = -2.0 * gy * gy_dot
+        h_ddot_drift_y = (-2.0 * gy_dot ** 2
+                          + 2.0 * gy * g_val / l * np.sin(gy)
+                          + 2.0 * gy * c_damp * gy_dot)
+        C_y = (2.0 * gy * np.cos(gy)) / l
+        rhs_y = h_ddot_drift_y + alpha_sum_h * h_dot_y + alpha_prod_h * h_y
+        add([0, C_y, 0, 0, 1], -rhs_y)
+
+        # delta >= 0
+        add([0, 0, 0, 1, 0], 0.0)
+        add([0, 0, 0, 0, 1], 0.0)
+
+    # ── Box constraint on translation ─────────────────────────────────
+    if u_max is not None:
+        add([ 1, 0, 0, 0, 0], -u_max)
+        add([-1, 0, 0, 0, 0], -u_max)
+        add([ 0, 1, 0, 0, 0], -u_max)
+        add([ 0,-1, 0, 0, 0], -u_max)
+
+    # ── Solve ──────────────────────────────────────────────────────────
+    C_mat = np.array(C_rows, dtype=np.float64).T  # (5, n_constraints)
+    b_vec = np.array(b_vals, dtype=np.float64)
+
+    try:
+        sol = quadprog.solve_qp(G, a_vec, C_mat, b_vec)
+        return sol[0][:3].astype(np.float32)
+    except Exception:
+        # infeasible or numerical failure → return nominal (already safe enough for viz)
+        return u_nom_i[:3].astype(np.float32)
+
+
+def solve_affine_qp_exact(
+    u_nom,
+    obs_hits, agent_pos, agent_vel, s, s_dot,
+    other_agent_pos, other_agent_vel, other_agent_s, other_agent_s_dot,
+    payload_states,
+    R_form, r_margin, s_min, s_max,
+    cable_length, gravity, payload_damping,
+    slack_weight=100.0, u_max=None,
+    alpha1_scale=2.0, alpha2_scale=2.0,
+    alpha1_obs=0.8, alpha2_obs=0.8,
+    hocbf_alpha1=2.0, hocbf_alpha2=2.0,
+) -> torch.Tensor:
+    """Exact QP solver (quadprog) for visualization.  Loops over agents."""
+    N = u_nom.shape[0]
+    results = []
+
+    for i in range(N):
+        u_nom_i = u_nom[i].numpy().astype(np.float64)
+        s_i = float(s[i])
+        sd_i = float(s_dot[i])
+        pos_i = agent_pos[i].numpy().astype(np.float64)
+        vel_i = agent_vel[i].numpy().astype(np.float64)
+
+        # Filter valid obstacle hits (non-hits stored as 1e6)
+        if obs_hits is not None:
+            hits_i = obs_hits[i].numpy()  # (nb, 2)
+            valid = ~np.any(hits_i > 1e5, axis=-1)
+            obs_i = hits_i[valid].astype(np.float64) if valid.any() else None
+        else:
+            obs_i = None
+
+        # Other agents
+        op = other_agent_pos[i].numpy().astype(np.float64) if other_agent_pos is not None else None
+        ov = other_agent_vel[i].numpy().astype(np.float64) if other_agent_vel is not None else None
+        os_ = other_agent_s[i].numpy().astype(np.float64) if other_agent_s is not None else None
+        osd = other_agent_s_dot[i].numpy().astype(np.float64) if other_agent_s_dot is not None else None
+
+        pay_i = payload_states[i].numpy().astype(np.float64) if payload_states is not None else None
+
+        sol_i = _solve_qp_exact_single(
+            u_nom_i, s_i, sd_i,
+            obs_i, pos_i, vel_i,
+            op, ov, os_, osd,
+            pay_i,
+            R_form, r_margin, s_min, s_max,
+            alpha1_scale, alpha2_scale,
+            alpha1_obs, alpha2_obs,
+            hocbf_alpha1, hocbf_alpha2,
+            cable_length, gravity, payload_damping,
+            slack_weight, u_max,
+        )
+        results.append(sol_i)
+
+    return torch.tensor(np.stack(results), dtype=torch.float32)
+
+
 def run_simulation(
     num_agents: int = 4,
     area_size: float = 2.0,
@@ -160,6 +359,7 @@ def run_simulation(
     force_lqr: bool = False,
     swarm_lqr: bool = False,
     scenario_path: Optional[str] = None,
+    use_exact_qp: bool = False,
 ):
     policy_net = None
     mode = "lqr"
@@ -328,30 +528,56 @@ def run_simulation(
                     other_s_flat = None
                     other_sd_flat = None
 
-                u = solve_affine_qp(
-                    u_nom=u_nom,
-                    obs_hits=lidar_hits,
-                    agent_pos=pos,
-                    agent_vel=v_current,
-                    s=sc,
-                    s_dot=sd,
-                    other_agent_pos=other_pos_flat,
-                    other_agent_vel=other_vel_flat,
-                    other_agent_s=other_s_flat,
-                    other_agent_s_dot=other_sd_flat,
-                    R_form=R_form,
-                    r_margin=r_margin,
-                    mass=env.params["mass"],
-                    s_min=s_min,
-                    s_max=s_max,
-                    payload_states=ps,
-                    cable_length=env.params["cable_length"],
-                    gravity=env.params["gravity"],
-                    gamma_min=env.params["gamma_min"],
-                    gamma_max_full=env.params["gamma_max_full"],
-                    payload_damping=env.params["payload_damping"],
-                    u_max=env.params.get("u_max"),
-                )
+                _qp_u_max = env.params.get("u_max")
+                if use_exact_qp and _QUADPROG_AVAILABLE:
+                    u = solve_affine_qp_exact(
+                        u_nom=u_nom,
+                        obs_hits=lidar_hits,
+                        agent_pos=pos,
+                        agent_vel=v_current,
+                        s=sc,
+                        s_dot=sd,
+                        other_agent_pos=other_pos_flat,
+                        other_agent_vel=other_vel_flat,
+                        other_agent_s=other_s_flat,
+                        other_agent_s_dot=other_sd_flat,
+                        payload_states=ps,
+                        R_form=R_form,
+                        r_margin=r_margin,
+                        s_min=s_min,
+                        s_max=s_max,
+                        cable_length=env.params["cable_length"],
+                        gravity=env.params["gravity"],
+                        payload_damping=env.params["payload_damping"],
+                        u_max=_qp_u_max,
+                    )
+                else:
+                    if use_exact_qp and not _QUADPROG_AVAILABLE:
+                        print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
+                    u = solve_affine_qp(
+                        u_nom=u_nom,
+                        obs_hits=lidar_hits,
+                        agent_pos=pos,
+                        agent_vel=v_current,
+                        s=sc,
+                        s_dot=sd,
+                        other_agent_pos=other_pos_flat,
+                        other_agent_vel=other_vel_flat,
+                        other_agent_s=other_s_flat,
+                        other_agent_s_dot=other_sd_flat,
+                        R_form=R_form,
+                        r_margin=r_margin,
+                        mass=env.params["mass"],
+                        s_min=s_min,
+                        s_max=s_max,
+                        payload_states=ps,
+                        cable_length=env.params["cable_length"],
+                        gravity=env.params["gravity"],
+                        gamma_min=env.params["gamma_min"],
+                        gamma_max_full=env.params["gamma_max_full"],
+                        payload_damping=env.params["payload_damping"],
+                        u_max=_qp_u_max,
+                    )
         else:
             u = env.nominal_controller()
 
@@ -845,6 +1071,8 @@ def main():
                         help="Ignore trained policy, use LQR only")
     parser.add_argument("--scenario", type=str, default=None,
                         help="Path to scenario JSON (hardcoded agent/goal/obstacle positions)")
+    parser.add_argument("--exact_qp", action="store_true",
+                        help="Use exact QP solver (quadprog) instead of Dykstra projection")
 
     args = parser.parse_args()
 
@@ -854,12 +1082,18 @@ def main():
     # For the purpose of this edit, we'll use dummy values or assume they exist.
     # policy_net, cfg, is_swarm are not defined in the provided context.
     # We will use the original run_simulation call structure and add edge_traj.
+    if args.exact_qp:
+        if _QUADPROG_AVAILABLE:
+            print("  [QP] Using exact solver (quadprog)")
+        else:
+            print("  [QP] quadprog not installed — pip install quadprog")
     result = run_simulation(
         num_agents=args.num_agents, area_size=args.area_size,
         max_steps=args.max_steps, dt=args.dt, n_obs=args.n_obs,
         seed=args.seed, checkpoint_path=args.checkpoint,
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
         scenario_path=args.scenario,
+        use_exact_qp=args.exact_qp,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,
      is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj, lidar_traj) = result
