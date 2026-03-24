@@ -353,7 +353,7 @@ def run_simulation(
     area_size: float = 2.0,
     max_steps: int = 512,
     dt: float = 0.03,
-    n_obs: int = 2,
+    n_obs: Optional[int] = None,
     seed: int = 0,
     checkpoint_path: Optional[str] = None,
     force_lqr: bool = False,
@@ -371,6 +371,9 @@ def run_simulation(
     s_max = 1.5
     cfg = None
 
+    if n_obs is None:
+        n_obs = 2  # default when no checkpoint
+
     if swarm_lqr:
         area_size = max(area_size, 15.0)
 
@@ -378,7 +381,11 @@ def run_simulation(
         policy_net, cfg = load_trained_policy(checkpoint_path)
         num_agents = cfg["num_agents"]
         area_size = cfg["area_size"]
-        n_obs = cfg["n_obs"]
+        n_obs_cfg = cfg["n_obs"]
+        if n_obs is None:
+            n_obs = n_obs_cfg
+        else:
+            print(f"  [n_obs] Overriding training config ({n_obs_cfg}) → {n_obs}")
         dt = cfg["dt"]
         comm_radius = cfg["comm_radius"]
         mode = "trained_policy"
@@ -1058,7 +1065,8 @@ def main():
     parser.add_argument("--area_size", type=float, default=2.0)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--dt", type=float, default=0.03)
-    parser.add_argument("--n_obs", type=int, default=2)
+    parser.add_argument("--n_obs", type=int, default=None,
+                        help="Override number of obstacles (default: 2 or training config)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save", type=str, default="trajectories.mp4")
     parser.add_argument("--fps", type=int, default=30)
@@ -1089,7 +1097,8 @@ def main():
             print("  [QP] quadprog not installed — pip install quadprog")
     result = run_simulation(
         num_agents=args.num_agents, area_size=args.area_size,
-        max_steps=args.max_steps, dt=args.dt, n_obs=args.n_obs,
+        max_steps=args.max_steps, dt=args.dt,
+        n_obs=args.n_obs,  # None → use training config; int → override
         seed=args.seed, checkpoint_path=args.checkpoint,
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
         scenario_path=args.scenario,

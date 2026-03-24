@@ -69,64 +69,66 @@ class AffinePolicy(MethodController):
             graph = env._get_graph()
             cfg = self.cfg
 
-            # Level 1: GNN → tanh → scale
+            # GNN → tanh → scale to physical acceleration offset
             pi_tanh = self.policy_net(graph)  # (n, 3) already tanh'd
-            v_max_cfg = cfg.get("v_max", 1.0)
-            s_dot_max_cfg = cfg.get("s_dot_max", 1.0)
-            K_pos = cfg.get("K_pos", 0.5)
-            K_v = cfg.get("K_v", 2.0)
-            K_s = cfg.get("K_s", 2.0)
-
-            # GNN → tanh → scale to physical acceleration offset (must match train_swarm.py)
-            a_max_gnn = 1.0    # m/s²
-            a_max_gnn_s = 0.5  # s⁻²
+            a_max_gnn   = 1.0   # m/s²
+            a_max_gnn_s = 0.5   # s⁻²
             pi_scaled = pi_tanh.clone()
             pi_scaled[:, :2] *= a_max_gnn
-            pi_scaled[:, 2] *= a_max_gnn_s
+            pi_scaled[:, 2]  *= a_max_gnn_s
 
             # PD nominal + GNN acceleration offset
-            pos = env.agent_states[:, :2]
-            goal_pos = env.goal_states[:, :2]
+            pos       = env.agent_states[:, :2]
+            goal_pos  = env.goal_states[:, :2]
             v_current = env.agent_states[:, 2:4]
-            s_current = env.scale_states[:, 0]
+            s_current    = env.scale_states[:, 0]
             s_dot_current = env.scale_states[:, 1]
 
-            v_ref = K_pos * (goal_pos - pos)
-            v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
-            s_dot_ref = 1.0 * (env.params.get("s_max", 1.5) - s_current)
+            v_max_cfg = cfg.get("v_max", 1.0)
+            K_pos = cfg.get("K_pos", 0.5)
+            K_v   = cfg.get("K_v",   2.0)
+            K_s   = cfg.get("K_s",   2.0)
+            s_max = env.params.get("s_max", 1.5)
 
-            a_trans = K_v * (v_ref - v_current) + pi_scaled[:, :2]
-            a_s = K_s * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
-            u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+            v_ref     = torch.clamp(K_pos * (goal_pos - pos), -v_max_cfg, v_max_cfg)
+            s_dot_ref = 1.0 * (s_max - s_current)
+            a_trans   = K_v * (v_ref - v_current) + pi_scaled[:, :2]
+            a_s       = K_s * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
+            u_nom     = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
-            # Pre-clamp to physically feasible range
             _u_max = env.params.get("u_max")
             if _u_max is not None:
-                _mass = env.params.get("mass", 0.1)
+                _mass  = env.params.get("mass", 0.1)
                 a_max_t = 3 * _u_max / _mass * 0.7
                 a_max_s = 3 * _u_max / _mass * 0.3
                 u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
-                u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
+                u_nom[:, 2]  = u_nom[:,  2].clamp(-a_max_s, a_max_s)
 
-            # Level 3: QP
+            # QP — LiDAR hits + agent-agent info
             sc = env.scale_states[:, 0]
             sd = env.scale_states[:, 1]
             ps = env.payload_states
-            n = env.num_agents
+            n  = env.num_agents
 
-            n_obs_env = len(env._obstacles)
-            if n_obs_env > 0:
-                oc = torch.stack([obs.center for obs in env._obstacles]).unsqueeze(0).expand(n, -1, -1)
-                ohs = torch.stack([obs.half_size for obs in env._obstacles]).unsqueeze(0).expand(n, -1, -1)
+            lidar_hits = env.get_lidar_hits(num_beams=32)[..., :2]  # (n, 32, 2)
+
+            if n > 1:
+                idx  = torch.arange(n)
+                mask = idx.unsqueeze(0) != idx.unsqueeze(1)
+                other_pos = pos.unsqueeze(0).expand(n, n, 2)[mask].reshape(n, n-1, 2)
+                other_vel = v_current.unsqueeze(0).expand(n, n, 2)[mask].reshape(n, n-1, 2)
+                other_s   = sc.unsqueeze(0).expand(n, n)[mask].reshape(n, n-1)
+                other_sd  = sd.unsqueeze(0).expand(n, n)[mask].reshape(n, n-1)
             else:
-                oc = None
-                ohs = None
+                other_pos = other_vel = other_s = other_sd = None
 
             u_qp = solve_affine_qp(
                 u_nom=u_nom,
-                obs_centers=oc, obs_half_sizes=ohs,
+                obs_hits=lidar_hits,
                 agent_pos=pos, agent_vel=v_current,
                 s=sc, s_dot=sd,
+                other_agent_pos=other_pos, other_agent_vel=other_vel,
+                other_agent_s=other_s, other_agent_s_dot=other_sd,
                 R_form=env.params["R_form"],
                 r_margin=env.params["r_margin"],
                 mass=env.params["mass"],
@@ -137,7 +139,7 @@ class AffinePolicy(MethodController):
                 gamma_min=env.params["gamma_min"],
                 gamma_max_full=env.params["gamma_max_full"],
                 payload_damping=env.params["payload_damping"],
-                u_max=env.params.get("u_max"),
+                u_max=_u_max,
             )
             return u_qp
 
@@ -151,29 +153,34 @@ class HOCBFWithLQR(MethodController):
         self.cfg = cfg or {}
 
     def select_action(self, env):
-        # Use nominal controller (proportional goal tracking + PD)
         u_ref = env.nominal_controller()
         with torch.no_grad():
             pos = env.agent_states[:, :2]
             vel = env.agent_states[:, 2:4]
-            sc = env.scale_states[:, 0]
-            sd = env.scale_states[:, 1]
-            ps = env.payload_states
-            n = env.num_agents
+            sc  = env.scale_states[:, 0]
+            sd  = env.scale_states[:, 1]
+            ps  = env.payload_states
+            n   = env.num_agents
 
-            n_obs_env = len(env._obstacles)
-            if n_obs_env > 0:
-                oc = torch.stack([obs.center for obs in env._obstacles]).unsqueeze(0).expand(n, -1, -1)
-                ohs = torch.stack([obs.half_size for obs in env._obstacles]).unsqueeze(0).expand(n, -1, -1)
+            lidar_hits = env.get_lidar_hits(num_beams=32)[..., :2]  # (n, 32, 2)
+
+            if n > 1:
+                idx  = torch.arange(n)
+                mask = idx.unsqueeze(0) != idx.unsqueeze(1)
+                other_pos = pos.unsqueeze(0).expand(n, n, 2)[mask].reshape(n, n-1, 2)
+                other_vel = vel.unsqueeze(0).expand(n, n, 2)[mask].reshape(n, n-1, 2)
+                other_s   = sc.unsqueeze(0).expand(n, n)[mask].reshape(n, n-1)
+                other_sd  = sd.unsqueeze(0).expand(n, n)[mask].reshape(n, n-1)
             else:
-                oc = None
-                ohs = None
+                other_pos = other_vel = other_s = other_sd = None
 
             u_qp = solve_affine_qp(
                 u_nom=u_ref,
-                obs_centers=oc, obs_half_sizes=ohs,
+                obs_hits=lidar_hits,
                 agent_pos=pos, agent_vel=vel,
                 s=sc, s_dot=sd,
+                other_agent_pos=other_pos, other_agent_vel=other_vel,
+                other_agent_s=other_s, other_agent_s_dot=other_sd,
                 R_form=env.params["R_form"],
                 r_margin=env.params["r_margin"],
                 mass=env.params["mass"],
@@ -304,6 +311,8 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path")
     parser.add_argument("--methods", type=str, default="affine_policy,hocbf_lqr,lqr_only",
                         help="Comma-separated method names")
+    parser.add_argument("--n_obs", type=int, default=None,
+                        help="Override number of obstacles (default: use training config)")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--seed_start", type=int, default=1000)
@@ -313,19 +322,29 @@ def main():
     policy_net, cfg = load_checkpoint(args.checkpoint)
     method_names = [m.strip() for m in args.methods.split(",")]
 
+    n_obs = args.n_obs if args.n_obs is not None else cfg["n_obs"]
+    if args.n_obs is not None:
+        print(f"  [n_obs] Overriding training config ({cfg['n_obs']}) → {n_obs}")
+
     env = SwarmIntegrator(
         num_agents=cfg["num_agents"],
         area_size=cfg["area_size"],
+        dt=cfg.get("dt", 0.03),
         params={
-            "n_obs": cfg["n_obs"],
+            "n_obs": n_obs,
             "comm_radius": cfg["comm_radius"],
             "R_form": cfg.get("R_form", 0.5),
             "r_margin": cfg.get("r_margin", 0.2),
             "s_min": cfg.get("s_min", 0.4),
             "s_max": cfg.get("s_max", 1.5),
+            "mass": cfg.get("mass", 0.1),
+            "u_max": cfg.get("u_max", 0.3),
+            "v_max": cfg.get("v_max", 1.0),
             "cable_length": cfg.get("cable_length", 1.0),
+            "gravity": cfg.get("gravity", 9.81),
             "gamma_min": cfg.get("gamma_min", 0.2),
             "gamma_max_full": cfg.get("gamma_max_full", 0.75),
+            "payload_damping": cfg.get("payload_damping", 0.03),
         },
     )
 
