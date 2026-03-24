@@ -154,6 +154,7 @@ def train(
     checkpoint_path: str = "affine_swarm_checkpoint.pt",
     device: str = "auto",
     use_payload: bool = True,
+    no_scale: bool = False,
 ) -> Dict[str, list]:
     """Train hierarchical velocity-command swarm policy."""
     torch.manual_seed(seed)
@@ -166,12 +167,16 @@ def train(
     print(f"  Device: {dev}")
 
     # ---- Env ----
+    env_override = {"n_obs": n_obs}
+    if no_scale:
+        env_override["s_min"] = 1.0
+        env_override["s_max"] = 1.0
     vec_env = VectorizedSwarmEnv(
         num_agents=num_agents,
         batch_size=batch_size,
         area_size=area_size,
-        params={"n_obs": n_obs},
-        max_steps=512,  # 動画の長さに合わせる
+        params=env_override,
+        max_steps=512,
     )
     vec_env.reset(dev)
 
@@ -280,6 +285,8 @@ def train(
                 pi_scaled = pi_agents.clone()
                 pi_scaled[:, :, :2] *= a_max_gnn
                 pi_scaled[:, :, 2] *= a_max_gnn_s
+                if no_scale:
+                    pi_scaled[:, :, 2] = 0.0
 
                 # Level 1+2: velocity → PD → acceleration (pre-clamped)
                 u_nom = _nominal_accel(
@@ -625,6 +632,7 @@ def train(
             "s_dot_max": s_dot_max,
             "architecture": "hierarchical_velocity_command",
             "use_payload": use_payload,
+            "no_scale": no_scale,
         },
         "history": history,
     }
@@ -658,6 +666,8 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--no_payload", action="store_true", default=False,
                         help="Disable payload dynamics and HOCBF constraint")
+    parser.add_argument("--no_scale", action="store_true", default=False,
+                        help="Fix formation scale at s=1.0 (ablation: no scale deformation)")
     args = parser.parse_args()
     a = vars(args)
     a["checkpoint_path"] = a.pop("checkpoint")

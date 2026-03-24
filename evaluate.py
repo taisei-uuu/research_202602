@@ -60,9 +60,10 @@ class AffinePolicy(MethodController):
     """Trained hierarchical velocity-command policy with analytical QP."""
     name = "affine_policy"
 
-    def __init__(self, policy_net, cfg):
+    def __init__(self, policy_net, cfg, no_scale: bool = False):
         self.policy_net = policy_net
         self.cfg = cfg
+        self.no_scale = no_scale
 
     def select_action(self, env):
         with torch.no_grad():
@@ -76,6 +77,8 @@ class AffinePolicy(MethodController):
             pi_scaled = pi_tanh.clone()
             pi_scaled[:, :2] *= a_max_gnn
             pi_scaled[:, 2]  *= a_max_gnn_s
+            if self.no_scale:
+                pi_scaled[:, 2] = 0.0
 
             # PD nominal + GNN acceleration offset
             pos       = env.agent_states[:, :2]
@@ -149,11 +152,14 @@ class HOCBFWithLQR(MethodController):
     """LQR velocity tracking + HOCBF filter (no learned policy)."""
     name = "hocbf_lqr"
 
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, no_scale: bool = False):
         self.cfg = cfg or {}
+        self.no_scale = no_scale
 
     def select_action(self, env):
         u_ref = env.nominal_controller()
+        if self.no_scale:
+            u_ref[:, 2] = 0.0
         with torch.no_grad():
             pos = env.agent_states[:, :2]
             vel = env.agent_states[:, 2:4]
@@ -313,6 +319,8 @@ def main():
                         help="Comma-separated method names")
     parser.add_argument("--n_obs", type=int, default=None,
                         help="Override number of obstacles (default: use training config)")
+    parser.add_argument("--no_scale", action="store_true", default=False,
+                        help="Fix scale at s=1.0 (ablation: no formation deformation)")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--seed_start", type=int, default=1000)
@@ -325,6 +333,8 @@ def main():
     n_obs = args.n_obs if args.n_obs is not None else cfg["n_obs"]
     if args.n_obs is not None:
         print(f"  [n_obs] Overriding training config ({cfg['n_obs']}) → {n_obs}")
+    if args.no_scale:
+        print("  [no_scale] Formation scale fixed at s=1.0")
 
     env = SwarmIntegrator(
         num_agents=cfg["num_agents"],
@@ -332,6 +342,7 @@ def main():
         dt=cfg.get("dt", 0.03),
         params={
             "n_obs": n_obs,
+            **({"s_min": 1.0, "s_max": 1.0} if args.no_scale else {}),
             "comm_radius": cfg["comm_radius"],
             "R_form": cfg.get("R_form", 0.5),
             "r_margin": cfg.get("r_margin", 0.2),
@@ -357,9 +368,9 @@ def main():
 
         cls = METHOD_REGISTRY[mname]
         if mname == "affine_policy":
-            method = cls(policy_net=policy_net, cfg=cfg)
+            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale)
         elif mname == "hocbf_lqr":
-            method = cls(cfg=cfg)
+            method = cls(cfg=cfg, no_scale=args.no_scale)
         else:
             method = cls()
 

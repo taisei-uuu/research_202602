@@ -360,6 +360,8 @@ def run_simulation(
     swarm_lqr: bool = False,
     scenario_path: Optional[str] = None,
     use_exact_qp: bool = False,
+    no_scale: bool = False,
+    method: str = "affine_policy",
 ):
     policy_net = None
     mode = "lqr"
@@ -394,15 +396,27 @@ def run_simulation(
         r_margin = cfg.get("r_margin", 0.2)
         s_min = cfg.get("s_min", 0.4)
         s_max = cfg.get("s_max", 1.5)
-        if force_lqr:
-            print("  [force_lqr] Ignoring trained policy — using LQR only")
+        if force_lqr or method != "affine_policy":
             policy_net = None
-            mode = "lqr"
+            if force_lqr:
+                print("  [force_lqr] Ignoring trained policy — using LQR only")
+
+    # Set mode label based on method
+    if method == "hocbf_lqr":
+        mode = "hocbf_lqr"
+    elif method == "lqr_only":
+        mode = "lqr"
+
+    if no_scale:
+        print("  [no_scale] Formation scale fixed at s=1.0")
 
     if is_swarm:
         # Use full cfg to ensure mass, gravity, obs_len_range, etc. exactly match training
         env_params = cfg.copy() if cfg else {}
         env_params.update({"n_obs": n_obs, "comm_radius": comm_radius})
+        if no_scale:
+            env_params["s_min"] = 1.0
+            env_params["s_max"] = 1.0
         env = SwarmIntegrator(
             num_agents=num_agents, area_size=area_size, dt=dt, max_steps=max_steps,
             params=env_params,
@@ -459,52 +473,52 @@ def run_simulation(
     a_max_gnn_s = 0.5  # s⁻²
 
     for step_idx in range(max_steps):
-        if policy_net is not None:
+        if method == "lqr_only":
+            u = env.nominal_controller()
+        else:
+            # affine_policy or hocbf_lqr — both use QP; differ only in u_nom source
             with torch.no_grad():
-                graph = env._get_graph()
-                # GNN → tanh → scale to physical acceleration offset
-                pi_tanh = policy_net(graph)  # (n, 3) already tanh'd
-                pi_scaled = pi_tanh.clone()
-                pi_scaled[:, :2] *= a_max_gnn
-                pi_scaled[:, 2] *= a_max_gnn_s
-
-                # PD nominal + GNN acceleration offset
                 pos = env.agent_states[:, :2]
                 goal_pos = env.goal_states[:, :2]
                 v_current = env.agent_states[:, 2:4]
-                s_current = env.scale_states[:, 0]
-                s_dot_current = env.scale_states[:, 1]
+                sc = env.scale_states[:, 0]
+                sd = env.scale_states[:, 1]
 
-                # Translation: nominal PD + GNN acceleration offset
+                # PD nominal: translation toward goal, scale toward s_max
                 v_ref = K_pos_cfg * (goal_pos - pos)
                 v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
-
-                # Scale: PD toward s_max (expansion potential)
-                K_s_pos = 1.0
-                s_dot_ref = K_s_pos * (s_max - s_current)
-
-                a_trans = K_v_cfg * (v_ref - v_current) + pi_scaled[:, :2]
-                a_s = K_s_cfg * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
+                s_dot_ref = 1.0 * (s_max - sc)
+                a_trans = K_v_cfg * (v_ref - v_current)
+                a_s = K_s_cfg * (s_dot_ref - sd)
                 u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
 
+                if method == "affine_policy" and policy_net is not None:
+                    # GNN → tanh → scale to physical acceleration offset
+                    graph = env._get_graph()
+                    pi_tanh = policy_net(graph)  # (n, 3) already tanh'd
+                    pi_scaled = pi_tanh.clone()
+                    pi_scaled[:, :2] *= a_max_gnn
+                    pi_scaled[:, 2] *= a_max_gnn_s
+                    if no_scale:
+                        pi_scaled[:, 2] = 0.0
+                    u_nom = u_nom + pi_scaled
+
+                if no_scale:
+                    u_nom[:, 2] = 0.0
+
                 # Pre-clamp to physically feasible range
-                _use_payload = cfg.get("use_payload", True) if cfg else True
                 _u_max = env.params.get("u_max")
                 if _u_max is not None:
                     _mass = env.params.get("mass", 0.1)
                     a_max_t = 3 * _u_max / _mass * 0.7
                     a_max_s = 3 * _u_max / _mass * 0.3
                     if _use_payload:
-                        a_max_payload = 0.5
-                        actual_a_max_t = min(a_max_t, a_max_payload)
+                        actual_a_max_t = min(a_max_t, 0.5)
                     else:
                         actual_a_max_t = a_max_t
                     u_nom[:, :2] = u_nom[:, :2].clamp(-actual_a_max_t, actual_a_max_t)
                     u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
-                # Level 3: QP
-                sc = env.scale_states[:, 0]
-                sd = env.scale_states[:, 1]
                 ps = env.payload_states if _use_payload else None
 
                 # Obstacle hits from LiDAR — always returns (num_agents, 32, 4)
@@ -517,23 +531,16 @@ def run_simulation(
                     dev = pos.device
                     agent_idx = torch.arange(num_agents, device=dev)
                     mask = agent_idx.unsqueeze(0) != agent_idx.unsqueeze(1)
-                    
                     pos_other = pos.unsqueeze(0).expand(num_agents, num_agents, 2)
                     other_pos_flat = pos_other[mask].reshape(num_agents, num_agents - 1, 2)
-                    
                     vel_other = v_current.unsqueeze(0).expand(num_agents, num_agents, 2)
                     other_vel_flat = vel_other[mask].reshape(num_agents, num_agents - 1, 2)
-                    
                     s_other = sc.unsqueeze(0).expand(num_agents, num_agents)
                     other_s_flat = s_other[mask].reshape(num_agents, num_agents - 1)
-                    
                     sd_other = sd.unsqueeze(0).expand(num_agents, num_agents)
                     other_sd_flat = sd_other[mask].reshape(num_agents, num_agents - 1)
                 else:
-                    other_pos_flat = None
-                    other_vel_flat = None
-                    other_s_flat = None
-                    other_sd_flat = None
+                    other_pos_flat = other_vel_flat = other_s_flat = other_sd_flat = None
 
                 _qp_u_max = env.params.get("u_max")
                 if use_exact_qp and _QUADPROG_AVAILABLE:
@@ -585,8 +592,6 @@ def run_simulation(
                         payload_damping=env.params["payload_damping"],
                         u_max=_qp_u_max,
                     )
-        else:
-            u = env.nominal_controller()
 
         next_obs, info = env.step(u)
         trajectories.append(env.agent_states.detach().numpy().copy())
@@ -737,7 +742,12 @@ def create_video(
             payload_cables.append(cable)
 
     entity_name = "swarms" if is_swarm else "agents"
-    mode_label = "Trained Policy π(x)" if mode == "trained_policy" else "LQR Controller"
+    _mode_labels = {
+        "trained_policy": "Trained Policy π(x)",
+        "hocbf_lqr": "HOCBF-LQR",
+        "lqr": "LQR Controller",
+    }
+    mode_label = _mode_labels.get(mode, mode)
     step_text = ax.text(
         0.02, 0.98, "", transform=ax.transAxes, fontsize=11, fontweight="bold",
         verticalalignment="top",
@@ -928,7 +938,12 @@ def plot_trajectories(
     n_agents = trajectories.shape[1]
     colors = [AGENT_COLORS[i % len(AGENT_COLORS)] for i in range(n_agents)]
     entity_name = "swarms" if is_swarm else "agents"
-    mode_label = "Trained Policy π(x)" if mode == "trained_policy" else "LQR Controller"
+    _mode_labels = {
+        "trained_policy": "Trained Policy π(x)",
+        "hocbf_lqr": "HOCBF-LQR",
+        "lqr": "LQR Controller",
+    }
+    mode_label = _mode_labels.get(mode, mode)
 
     fig, ax = plt.subplots(figsize=(9, 9))
     ax.set_facecolor("#f8f9fa")
@@ -1081,6 +1096,11 @@ def main():
                         help="Path to scenario JSON (hardcoded agent/goal/obstacle positions)")
     parser.add_argument("--exact_qp", action="store_true",
                         help="Use exact QP solver (quadprog) instead of Dykstra projection")
+    parser.add_argument("--no_scale", action="store_true", default=False,
+                        help="Fix scale at s=1.0 (ablation: no formation deformation)")
+    parser.add_argument("--method", type=str, default="affine_policy",
+                        choices=["affine_policy", "hocbf_lqr", "lqr_only"],
+                        help="Control method to visualize (default: affine_policy)")
 
     args = parser.parse_args()
 
@@ -1103,6 +1123,8 @@ def main():
         force_lqr=args.force_lqr, swarm_lqr=args.swarm_lqr,
         scenario_path=args.scenario,
         use_exact_qp=args.exact_qp,
+        no_scale=args.no_scale,
+        method=args.method,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,
      is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj, lidar_traj) = result
