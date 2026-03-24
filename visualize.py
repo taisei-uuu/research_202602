@@ -744,7 +744,7 @@ def create_video(
     entity_name = "swarms" if is_swarm else "agents"
     _mode_labels = {
         "trained_policy": "Trained Policy π(x)",
-        "hocbf_lqr": "HOCBF-LQR",
+        "hocbf_lqr": "HOCBF+LQR",
         "lqr": "LQR Controller",
     }
     mode_label = _mode_labels.get(mode, mode)
@@ -940,7 +940,7 @@ def plot_trajectories(
     entity_name = "swarms" if is_swarm else "agents"
     _mode_labels = {
         "trained_policy": "Trained Policy π(x)",
-        "hocbf_lqr": "HOCBF-LQR",
+        "hocbf_lqr": "HOCBF+LQR",
         "lqr": "LQR Controller",
     }
     mode_label = _mode_labels.get(mode, mode)
