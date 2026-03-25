@@ -115,7 +115,8 @@ class VectorizedSwarmEnv:
 
     @property
     def node_dim(self) -> int:
-        return 3
+        # 3D one-hot + 4D payload state when payload is enabled
+        return 7 if self.params.get("use_payload", True) else 3
 
     @property
     def edge_dim(self) -> int:
@@ -547,11 +548,13 @@ class VectorizedSwarmEnv:
         s = scale_states[:, :, 0]
         dyn_cr = self.comm_radius * s
         
+        use_payload = self.params.get("use_payload", True)
         return build_vectorized_swarm_graph(
             agent_states=agent_states,
             goal_states=self._goal_states,
-            obstacle_states=flat_hits, # センターではなくヒットポイントを渡す！
+            obstacle_states=flat_hits,
             comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
+            payload_states=self._payload_states if use_payload else None,
         )

@@ -34,16 +34,18 @@ def build_swarm_graph_from_states(
     comm_radius: Union[float, torch.Tensor],
     node_dim: int = 3,
     edge_dim: int = 4,
+    payload_states: Optional[torch.Tensor] = None,  # (n_agents, 4): [gx, gy, gx_dot, gy_dot]
 ) -> GraphsTuple:
     """
     Build a GraphsTuple for swarm agents using LiDAR-based hit points.
 
     Parameters
     ----------
-    agent_states : (n_agents, 4)
-    goal_states  : (n_agents, 4)
+    agent_states    : (n_agents, 4)
+    goal_states     : (n_agents, 4)
     obstacle_positions : List[torch.Tensor] (per-agent hits) or (n_obs, 4) tensor
-    comm_radius : float or (n_agents,) tensor
+    comm_radius     : float or (n_agents,) tensor
+    payload_states  : (n_agents, 4) optional — appended to agent node features when provided
     """
     n_agents = agent_states.shape[0]
     device = agent_states.device
@@ -75,10 +77,13 @@ def build_swarm_graph_from_states(
     node_type_vec = torch.cat(node_types, dim=0)
     n_total = all_states_cat.shape[0]
 
-    # ---- One-hot node features ----
+    # ---- One-hot node features (first 3 dims) + optional payload (dims 3-6) ----
     node_feats = torch.zeros(n_total, node_dim, device=device)
-    for t in range(node_dim):
+    for t in range(3):  # one-hot part is always 3D
         node_feats[node_type_vec == t, t] = 1.0
+    # Append payload state [gx, gy, gx_dot, gy_dot] to agent nodes (type 0)
+    if payload_states is not None and node_dim == 7:
+        node_feats[:n_agents, 3:7] = payload_states[:, :4].to(device)
 
     # ---- Build Mask Matrix (N_total, n_agents) ----
     # mask[i, j] = True means there is a sender-edge from node i to agent j
@@ -151,6 +156,7 @@ def build_vectorized_swarm_graph(
     comm_radius: Union[float, torch.Tensor],
     node_dim: int = 3,
     edge_dim: int = 4,
+    payload_states: Optional[torch.Tensor] = None,  # (B, n_agents, 4)
 ) -> GraphsTuple:
     """
     Build ONE mega-graph from B independent swarm environments.
@@ -163,6 +169,7 @@ def build_vectorized_swarm_graph(
     comm_radius     : float or (B, n_agents) tensor
         If tensor, each agent in each batch has its own sensing radius.
     node_dim, edge_dim : int
+    payload_states  : (B, n_agents, 4) optional — appended to agent node features when provided
 
     Returns
     -------
@@ -179,7 +186,12 @@ def build_vectorized_swarm_graph(
     nf[n:2*n, 1] = 1.0
     if n_obs > 0:
         nf[2*n:, 2] = 1.0
-    node_feats = nf.unsqueeze(0).expand(B, -1, -1).reshape(B * N_per, node_dim)
+    # Tile across batch: (B, N_per, node_dim), then add payload per-agent
+    node_feats = nf.unsqueeze(0).expand(B, -1, -1).clone().reshape(B, N_per, node_dim)
+    # Append payload state [gx, gy, gx_dot, gy_dot] to agent nodes when provided
+    if payload_states is not None and node_dim == 7:
+        node_feats[:, :n, 3:7] = payload_states[:, :, :4]
+    node_feats = node_feats.reshape(B * N_per, node_dim)
 
     nt_parts = [
         torch.zeros(n, dtype=torch.long, device=device),

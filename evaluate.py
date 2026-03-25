@@ -597,6 +597,7 @@ def main():
         dt=cfg.get("dt", 0.03),
         params={
             "n_obs": n_obs,
+            "use_payload": cfg.get("use_payload", True),
             **({"s_min": 1.0, "s_max": 1.0} if args.no_scale else {}),
             "comm_radius": cfg["comm_radius"],
             "R_form": cfg.get("R_form", 0.5),

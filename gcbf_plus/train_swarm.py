@@ -167,7 +167,7 @@ def train(
     print(f"  Device: {dev}")
 
     # ---- Env ----
-    env_override = {"n_obs": n_obs}
+    env_override = {"n_obs": n_obs, "use_payload": use_payload}
     if no_scale:
         env_override["s_min"] = 1.0
         env_override["s_max"] = 1.0
@@ -425,6 +425,7 @@ def train(
                     comm_radius=dyn_cr,
                     node_dim=vec_env.node_dim,
                     edge_dim=vec_env.edge_dim,
+                    payload_states=mb_payload if use_payload else None,
                 )
 
                 # ── GNN → tanh → scale to physical acceleration offset ──
