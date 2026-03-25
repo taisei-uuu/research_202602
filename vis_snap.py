@@ -206,6 +206,8 @@ def main():
                         help="Draw bounding circle every N steps (default: 20)")
     parser.add_argument("--output", type=str, default="snapshot.png",
                         help="Output PNG path (default: snapshot.png)")
+    parser.add_argument("--exact_qp", action="store_true", default=False,
+                        help="Use exact QP solver (quadprog) instead of Dykstra projection")
     args = parser.parse_args()
 
     print("Running simulation...")
@@ -218,6 +220,7 @@ def main():
         scenario_path=args.scenario,
         no_scale=args.no_scale,
         method=args.method,
+        use_exact_qp=args.exact_qp,
     )
     (trajectories, goals, obstacle_info, area, _comm_r, mode,
      _is_swarm, R_form, r_margin, _payload_traj, _cable_length,
