@@ -27,6 +27,200 @@ from gcbf_plus.env import SwarmIntegrator
 from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
 
+try:
+    import quadprog
+    _QUADPROG_AVAILABLE = True
+except ImportError:
+    _QUADPROG_AVAILABLE = False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Exact QP solver (quadprog) — ported from visualize.py
+# ═══════════════════════════════════════════════════════════════════════
+
+def _solve_qp_exact_single(
+    u_nom_i,       # (3,) numpy float64
+    s_i, sd_i,     # float
+    obs_hits_i,    # (K, 2) numpy — valid (filtered) obstacle hit points, or None
+    agent_pos_i,   # (2,) numpy
+    agent_vel_i,   # (2,) numpy
+    other_pos,     # (M, 2) numpy or None
+    other_vel,     # (M, 2) numpy or None
+    other_s,       # (M,) numpy or None
+    other_sd,      # (M,) numpy or None
+    payload_i,     # (4,) numpy or None — [gx, gy, gx_dot, gy_dot]
+    R_form, r_margin, s_min, s_max,
+    alpha1_scale, alpha2_scale,
+    alpha1_obs, alpha2_obs,
+    hocbf_alpha1, hocbf_alpha2,
+    cable_length, gravity, payload_damping,
+    slack_weight, u_max,
+) -> np.ndarray:
+    """Solve per-agent QP exactly using quadprog.
+
+    Variable: X5 = [a_cx, a_cy, a_s, delta_x, delta_y]  (5D)
+    Objective: min 1/2 X5^T G X5 - a^T X5
+    where G = diag([1, 1, 1, p, p]),  a = [u_nom; 0; 0]
+
+    Returns: (3,) numpy array [a_cx, a_cy, a_s]
+    """
+    p = slack_weight
+    G = np.diag([1.0, 1.0, 1.0, p, p]) + np.eye(5) * 1e-8
+    a_vec = np.array([u_nom_i[0], u_nom_i[1], u_nom_i[2], 0.0, 0.0], dtype=np.float64)
+
+    C_rows = []
+    b_vals = []
+
+    def add(row, b):
+        C_rows.append(np.array(row, dtype=np.float64))
+        b_vals.append(float(b))
+
+    # Scale CBF (2nd order HOCBF)
+    alpha_sum_s = alpha1_scale + alpha2_scale
+    alpha_prod_s = alpha1_scale * alpha2_scale
+    lb = -alpha_sum_s * sd_i - alpha_prod_s * (s_i - s_min)
+    ub = -alpha_sum_s * sd_i + alpha_prod_s * (s_max - s_i)
+    add([0, 0,  1, 0, 0],  lb)
+    add([0, 0, -1, 0, 0], -ub)
+
+    # Obstacle CBF (2nd order HOCBF)
+    if obs_hits_i is not None and len(obs_hits_i) > 0:
+        a1, a2 = alpha1_obs, alpha2_obs
+        r_sw = R_form * s_i + r_margin
+        r_dot = R_form * sd_i
+        for obs_pt in obs_hits_i:
+            dp = agent_pos_i - obs_pt
+            dist_sq = float(np.dot(dp, dp))
+            h = dist_sq - r_sw ** 2
+            h_dot = 2.0 * float(np.dot(dp, agent_vel_i)) - 2.0 * r_sw * r_dot
+            h_ddot_drift = 2.0 * float(np.dot(agent_vel_i, agent_vel_i)) - 2.0 * r_dot ** 2
+            A_cx = 2.0 * dp[0]
+            A_cy = 2.0 * dp[1]
+            A_as = -2.0 * r_sw * R_form
+            rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h
+            add([A_cx, A_cy, A_as, 0, 0], -rhs)
+
+    # Agent-Agent CBF (2nd order HOCBF + Reciprocal CA)
+    if other_pos is not None and len(other_pos) > 0:
+        a1, a2 = alpha1_obs, alpha2_obs
+        r_sw = R_form * s_i + r_margin
+        for j in range(len(other_pos)):
+            r_other = R_form * float(other_s[j]) + r_margin
+            safe_dist = r_sw + r_other
+            dp = agent_pos_i - other_pos[j]
+            dv = agent_vel_i - other_vel[j]
+            dist_sq = float(np.dot(dp, dp))
+            h = dist_sq - safe_dist ** 2
+            r_dot_total = R_form * (sd_i + float(other_sd[j]))
+            h_dot = 2.0 * float(np.dot(dp, dv)) - 2.0 * safe_dist * r_dot_total
+            h_ddot_drift = 2.0 * float(np.dot(dv, dv)) - 2.0 * r_dot_total ** 2
+            A_cx = 2.0 * dp[0]
+            A_cy = 2.0 * dp[1]
+            A_as = -2.0 * safe_dist * R_form
+            rhs = (h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h) * 0.5
+            add([A_cx, A_cy, A_as, 0, 0], -rhs)
+
+    # Payload HOCBF (soft, with slack delta)
+    if payload_i is not None:
+        gx, gy, gx_dot, gy_dot = payload_i
+        l, g_val, c_damp = cable_length, gravity, payload_damping
+        a1, a2 = hocbf_alpha1, hocbf_alpha2
+        alpha_sum_h = a1 + a2
+        alpha_prod_h = a1 * a2
+
+        ratio = np.clip(R_form * s_i / l, 0.0, 0.95)
+        gamma_dyn = np.arcsin(ratio)
+
+        h_x = gamma_dyn ** 2 - gx ** 2
+        h_dot_x = -2.0 * gx * gx_dot
+        h_ddot_drift_x = (-2.0 * gx_dot ** 2
+                          + 2.0 * gx * g_val / l * np.sin(gx)
+                          + 2.0 * gx * c_damp * gx_dot)
+        C_x = (2.0 * gx * np.cos(gx)) / l
+        rhs_x = h_ddot_drift_x + alpha_sum_h * h_dot_x + alpha_prod_h * h_x
+        add([C_x, 0, 0, 1, 0], -rhs_x)
+
+        h_y = gamma_dyn ** 2 - gy ** 2
+        h_dot_y = -2.0 * gy * gy_dot
+        h_ddot_drift_y = (-2.0 * gy_dot ** 2
+                          + 2.0 * gy * g_val / l * np.sin(gy)
+                          + 2.0 * gy * c_damp * gy_dot)
+        C_y = (2.0 * gy * np.cos(gy)) / l
+        rhs_y = h_ddot_drift_y + alpha_sum_h * h_dot_y + alpha_prod_h * h_y
+        add([0, C_y, 0, 0, 1], -rhs_y)
+
+        add([0, 0, 0, 1, 0], 0.0)
+        add([0, 0, 0, 0, 1], 0.0)
+
+    # Box constraint on translation
+    if u_max is not None:
+        add([ 1, 0, 0, 0, 0], -u_max)
+        add([-1, 0, 0, 0, 0], -u_max)
+        add([ 0, 1, 0, 0, 0], -u_max)
+        add([ 0,-1, 0, 0, 0], -u_max)
+
+    C_mat = np.array(C_rows, dtype=np.float64).T  # (5, n_constraints)
+    b_vec = np.array(b_vals, dtype=np.float64)
+
+    try:
+        sol = quadprog.solve_qp(G, a_vec, C_mat, b_vec)
+        return sol[0][:3].astype(np.float32)
+    except Exception:
+        return u_nom_i[:3].astype(np.float32)
+
+
+def solve_affine_qp_exact(
+    u_nom,
+    obs_hits, agent_pos, agent_vel, s, s_dot,
+    other_agent_pos, other_agent_vel, other_agent_s, other_agent_s_dot,
+    payload_states,
+    R_form, r_margin, s_min, s_max,
+    cable_length, gravity, payload_damping,
+    slack_weight=100.0, u_max=None,
+    alpha1_scale=2.0, alpha2_scale=2.0,
+    alpha1_obs=0.8, alpha2_obs=0.8,
+    hocbf_alpha1=2.0, hocbf_alpha2=2.0,
+) -> torch.Tensor:
+    """Exact QP solver (quadprog). Loops over agents."""
+    N = u_nom.shape[0]
+    results = []
+
+    for i in range(N):
+        u_nom_i = u_nom[i].numpy().astype(np.float64)
+        s_i = float(s[i])
+        sd_i = float(s_dot[i])
+        pos_i = agent_pos[i].numpy().astype(np.float64)
+        vel_i = agent_vel[i].numpy().astype(np.float64)
+
+        if obs_hits is not None:
+            hits_i = obs_hits[i].numpy()
+            valid = ~np.any(hits_i > 1e5, axis=-1)
+            obs_i = hits_i[valid].astype(np.float64) if valid.any() else None
+        else:
+            obs_i = None
+
+        op  = other_agent_pos[i].numpy().astype(np.float64)  if other_agent_pos  is not None else None
+        ov  = other_agent_vel[i].numpy().astype(np.float64)  if other_agent_vel  is not None else None
+        os_ = other_agent_s[i].numpy().astype(np.float64)    if other_agent_s    is not None else None
+        osd = other_agent_s_dot[i].numpy().astype(np.float64) if other_agent_s_dot is not None else None
+        pay_i = payload_states[i].numpy().astype(np.float64) if payload_states is not None else None
+
+        sol_i = _solve_qp_exact_single(
+            u_nom_i, s_i, sd_i,
+            obs_i, pos_i, vel_i,
+            op, ov, os_, osd,
+            pay_i,
+            R_form, r_margin, s_min, s_max,
+            alpha1_scale, alpha2_scale,
+            alpha1_obs, alpha2_obs,
+            hocbf_alpha1, hocbf_alpha2,
+            cable_length, gravity, payload_damping,
+            slack_weight, u_max,
+        )
+        results.append(sol_i)
+
+    return torch.tensor(np.stack(results), dtype=torch.float32)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Method registry
@@ -60,10 +254,11 @@ class AffinePolicy(MethodController):
     """Trained hierarchical velocity-command policy with analytical QP."""
     name = "affine_policy"
 
-    def __init__(self, policy_net, cfg, no_scale: bool = False):
+    def __init__(self, policy_net, cfg, no_scale: bool = False, use_exact_qp: bool = False):
         self.policy_net = policy_net
         self.cfg = cfg
         self.no_scale = no_scale
+        self.use_exact_qp = use_exact_qp
 
     def select_action(self, env):
         with torch.no_grad():
@@ -125,25 +320,45 @@ class AffinePolicy(MethodController):
             else:
                 other_pos = other_vel = other_s = other_sd = None
 
-            u_qp = solve_affine_qp(
-                u_nom=u_nom,
-                obs_hits=lidar_hits,
-                agent_pos=pos, agent_vel=v_current,
-                s=sc, s_dot=sd,
-                other_agent_pos=other_pos, other_agent_vel=other_vel,
-                other_agent_s=other_s, other_agent_s_dot=other_sd,
-                R_form=env.params["R_form"],
-                r_margin=env.params["r_margin"],
-                mass=env.params["mass"],
-                s_min=env.params["s_min"], s_max=env.params["s_max"],
-                payload_states=ps,
-                cable_length=env.params["cable_length"],
-                gravity=env.params["gravity"],
-                gamma_min=env.params["gamma_min"],
-                gamma_max_full=env.params["gamma_max_full"],
-                payload_damping=env.params["payload_damping"],
-                u_max=_u_max,
-            )
+            if self.use_exact_qp and _QUADPROG_AVAILABLE:
+                u_qp = solve_affine_qp_exact(
+                    u_nom=u_nom,
+                    obs_hits=lidar_hits,
+                    agent_pos=pos, agent_vel=v_current,
+                    s=sc, s_dot=sd,
+                    other_agent_pos=other_pos, other_agent_vel=other_vel,
+                    other_agent_s=other_s, other_agent_s_dot=other_sd,
+                    payload_states=ps,
+                    R_form=env.params["R_form"],
+                    r_margin=env.params["r_margin"],
+                    s_min=env.params["s_min"], s_max=env.params["s_max"],
+                    cable_length=env.params["cable_length"],
+                    gravity=env.params["gravity"],
+                    payload_damping=env.params["payload_damping"],
+                    u_max=_u_max,
+                )
+            else:
+                if self.use_exact_qp and not _QUADPROG_AVAILABLE:
+                    print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
+                u_qp = solve_affine_qp(
+                    u_nom=u_nom,
+                    obs_hits=lidar_hits,
+                    agent_pos=pos, agent_vel=v_current,
+                    s=sc, s_dot=sd,
+                    other_agent_pos=other_pos, other_agent_vel=other_vel,
+                    other_agent_s=other_s, other_agent_s_dot=other_sd,
+                    R_form=env.params["R_form"],
+                    r_margin=env.params["r_margin"],
+                    mass=env.params["mass"],
+                    s_min=env.params["s_min"], s_max=env.params["s_max"],
+                    payload_states=ps,
+                    cable_length=env.params["cable_length"],
+                    gravity=env.params["gravity"],
+                    gamma_min=env.params["gamma_min"],
+                    gamma_max_full=env.params["gamma_max_full"],
+                    payload_damping=env.params["payload_damping"],
+                    u_max=_u_max,
+                )
             return u_qp
 
 
@@ -152,9 +367,10 @@ class HOCBFWithLQR(MethodController):
     """LQR velocity tracking + HOCBF filter (no learned policy)."""
     name = "hocbf_lqr"
 
-    def __init__(self, cfg=None, no_scale: bool = False):
+    def __init__(self, cfg=None, no_scale: bool = False, use_exact_qp: bool = False):
         self.cfg = cfg or {}
         self.no_scale = no_scale
+        self.use_exact_qp = use_exact_qp
 
     def select_action(self, env):
         s_max = env.params.get("s_max", 1.5)
@@ -182,25 +398,45 @@ class HOCBFWithLQR(MethodController):
             else:
                 other_pos = other_vel = other_s = other_sd = None
 
-            u_qp = solve_affine_qp(
-                u_nom=u_ref,
-                obs_hits=lidar_hits,
-                agent_pos=pos, agent_vel=vel,
-                s=sc, s_dot=sd,
-                other_agent_pos=other_pos, other_agent_vel=other_vel,
-                other_agent_s=other_s, other_agent_s_dot=other_sd,
-                R_form=env.params["R_form"],
-                r_margin=env.params["r_margin"],
-                mass=env.params["mass"],
-                s_min=env.params["s_min"], s_max=env.params["s_max"],
-                payload_states=ps,
-                cable_length=env.params["cable_length"],
-                gravity=env.params["gravity"],
-                gamma_min=env.params["gamma_min"],
-                gamma_max_full=env.params["gamma_max_full"],
-                payload_damping=env.params["payload_damping"],
-                u_max=env.params.get("u_max"),
-            )
+            if self.use_exact_qp and _QUADPROG_AVAILABLE:
+                u_qp = solve_affine_qp_exact(
+                    u_nom=u_ref,
+                    obs_hits=lidar_hits,
+                    agent_pos=pos, agent_vel=vel,
+                    s=sc, s_dot=sd,
+                    other_agent_pos=other_pos, other_agent_vel=other_vel,
+                    other_agent_s=other_s, other_agent_s_dot=other_sd,
+                    payload_states=ps,
+                    R_form=env.params["R_form"],
+                    r_margin=env.params["r_margin"],
+                    s_min=env.params["s_min"], s_max=env.params["s_max"],
+                    cable_length=env.params["cable_length"],
+                    gravity=env.params["gravity"],
+                    payload_damping=env.params["payload_damping"],
+                    u_max=env.params.get("u_max"),
+                )
+            else:
+                if self.use_exact_qp and not _QUADPROG_AVAILABLE:
+                    print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
+                u_qp = solve_affine_qp(
+                    u_nom=u_ref,
+                    obs_hits=lidar_hits,
+                    agent_pos=pos, agent_vel=vel,
+                    s=sc, s_dot=sd,
+                    other_agent_pos=other_pos, other_agent_vel=other_vel,
+                    other_agent_s=other_s, other_agent_s_dot=other_sd,
+                    R_form=env.params["R_form"],
+                    r_margin=env.params["r_margin"],
+                    mass=env.params["mass"],
+                    s_min=env.params["s_min"], s_max=env.params["s_max"],
+                    payload_states=ps,
+                    cable_length=env.params["cable_length"],
+                    gravity=env.params["gravity"],
+                    gamma_min=env.params["gamma_min"],
+                    gamma_max_full=env.params["gamma_max_full"],
+                    payload_damping=env.params["payload_damping"],
+                    u_max=env.params.get("u_max"),
+                )
             return u_qp
 
 
@@ -321,6 +557,8 @@ def main():
                         help="Comma-separated method names")
     parser.add_argument("--n_obs", type=int, default=None,
                         help="Override number of obstacles (default: use training config)")
+    parser.add_argument("--exact_qp", action="store_true", default=False,
+                        help="Use exact QP solver (quadprog) instead of Dykstra projection")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
     parser.add_argument("--episodes", type=int, default=20)
@@ -330,6 +568,12 @@ def main():
     parser.add_argument("--seed_start", type=int, default=1000)
     parser.add_argument("--save_json", type=str, default="eval_results.json")
     args = parser.parse_args()
+
+    if args.exact_qp:
+        if _QUADPROG_AVAILABLE:
+            print("  [QP] Using exact solver (quadprog)")
+        else:
+            print("  [QP] quadprog not installed — pip install quadprog")
 
     policy_net, cfg = load_checkpoint(args.checkpoint)
     method_names = [m.strip() for m in args.methods.split(",")]
@@ -376,9 +620,9 @@ def main():
 
         cls = METHOD_REGISTRY[mname]
         if mname == "affine_policy":
-            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale)
+            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp)
         elif mname == "hocbf_lqr":
-            method = cls(cfg=cfg, no_scale=args.no_scale)
+            method = cls(cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp)
         else:
             method = cls()
 
