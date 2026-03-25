@@ -470,6 +470,7 @@ def evaluate_episode(
     collision_count = 0
     goal_reached_step = None
     max_gamma = 0.0
+    gamma_values = []
     scale_values = []
 
     for t in range(max_steps):
@@ -497,6 +498,7 @@ def evaluate_episode(
         # Payload swing
         gamma = torch.sqrt(env.payload_states[:, 0]**2 + env.payload_states[:, 1]**2)
         max_gamma = max(max_gamma, gamma.max().item())
+        gamma_values.append(gamma.mean().item())
 
         # Goal distance
         goal_dist = torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1)
@@ -519,6 +521,7 @@ def evaluate_episode(
         "goal_time": goal_reached_step,
         "final_goal_dist": final_goal_dist.mean().item(),
         "max_gamma": max_gamma,
+        "mean_gamma": float(np.mean(gamma_values)) if gamma_values else 0.0,
         "scale_mean": scale_stack.mean().item(),
         "scale_min": scale_stack.min().item(),
         "scale_max": scale_stack.max().item(),
