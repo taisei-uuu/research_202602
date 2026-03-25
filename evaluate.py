@@ -157,7 +157,9 @@ class HOCBFWithLQR(MethodController):
         self.no_scale = no_scale
 
     def select_action(self, env):
-        u_ref = env.nominal_controller()
+        s_max = env.params.get("s_max", 1.5)
+        s_dot_target = 1.0 * (s_max - env.scale_states[:, 0])
+        u_ref = env.nominal_controller(s_dot_target=s_dot_target)
         if self.no_scale:
             u_ref[:, 2] = 0.0
         with torch.no_grad():
@@ -323,6 +325,8 @@ def main():
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--max_steps", type=int, default=512)
+    parser.add_argument("--area_size", type=float, default=None,
+                        help="Override arena size (default: use training config)")
     parser.add_argument("--seed_start", type=int, default=1000)
     parser.add_argument("--save_json", type=str, default="eval_results.json")
     args = parser.parse_args()
@@ -336,9 +340,13 @@ def main():
     if args.no_scale:
         print("  [no_scale] Formation scale fixed at s=1.0")
 
+    area_size = args.area_size if args.area_size is not None else cfg["area_size"]
+    if args.area_size is not None:
+        print(f"  [area_size] Overriding training config ({cfg['area_size']}) → {area_size}")
+
     env = SwarmIntegrator(
         num_agents=cfg["num_agents"],
-        area_size=cfg["area_size"],
+        area_size=area_size,
         dt=cfg.get("dt", 0.03),
         params={
             "n_obs": n_obs,
