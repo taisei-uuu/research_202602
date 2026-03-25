@@ -100,7 +100,8 @@ def solve_affine_qp(
         gx_dot = payload_states[:, 2]
         gy_dot = payload_states[:, 3]
 
-        l = cable_length
+        # l_eff(s) = sqrt(cable_length² - (R_form·s)²): effective vertical pendulum length
+        l = torch.sqrt(torch.clamp(cable_length**2 - (R_form * s)**2, min=1e-4))
         g_val = gravity
         c_damp = payload_damping
 
@@ -108,7 +109,7 @@ def solve_affine_qp(
         # Dynamic γ_max(s) based on physical swarm radius:
         # γ_max(s) = asin(R_form * s / L)
         # -----------------------------------------------------------------
-        ratio = (R_form * s) / l
+        ratio = (R_form * s) / cable_length  # use full cable_length for angle limit
         clamped_ratio = torch.clamp(ratio, 0.0, 0.95)
         gamma_dyn = torch.asin(clamped_ratio)
 

@@ -319,7 +319,10 @@ class SwarmIntegrator:
         self.scale_states = torch.stack([new_s, new_s_dot], dim=-1)
 
         # ── Payload swing dynamics (Semi-implicit / Symplectic Euler) ──
-        l = self.params["cable_length"]
+        cable_length = self.params["cable_length"]
+        R_form = self.params["R_form"]
+        s_cur = self.scale_states[:, 0]  # (n,)
+        l = torch.sqrt(torch.clamp(cable_length**2 - (R_form * s_cur)**2, min=1e-4))  # l_eff(s)
         g = self.params["gravity"]
         c = self.params["payload_damping"]
         ps = self.payload_states

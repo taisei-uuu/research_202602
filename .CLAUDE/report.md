@@ -99,16 +99,25 @@ $$s_{t+1} = \text{clamp}\!\left(s_t + \dot{s}_{t+1} \Delta t,\; s_\text{min},\; 
 
 **ペイロード揺れダイナミクス（非線形振り子 + 粘性ダンピング）**：
 
-$$\ddot{\gamma}_x = -\frac{g}{l}\sin(\gamma_x) - \frac{a_{cx}}{l}\cos(\gamma_x) - c\,\dot{\gamma}_x$$
+スワームの拡大縮小により，ドローンリング半径 $R_\text{form} \cdot s$ が変化する．ケーブル長（ドローン→ペイロード）を $L$ とすると，**有効垂直振り子長**（鉛直方向のみの等価長）は：
 
-$$\ddot{\gamma}_y = -\frac{g}{l}\sin(\gamma_y) - \frac{a_{cy}}{l}\cos(\gamma_y) - c\,\dot{\gamma}_y$$
+$$l_\text{eff}(s) = \sqrt{L^2 - (R_\text{form} \cdot s)^2}$$
 
-数値積分は Semi-implicit Euler 法（速度を先に更新してから位置を更新）で行い，数値的安定性を確保する．
+これを用いた振り子方程式：
+
+$$\ddot{\gamma}_x = -\frac{g}{l_\text{eff}(s)}\sin(\gamma_x) - \frac{a_{cx}}{l_\text{eff}(s)}\cos(\gamma_x) - c\,\dot{\gamma}_x$$
+
+$$\ddot{\gamma}_y = -\frac{g}{l_\text{eff}(s)}\sin(\gamma_y) - \frac{a_{cy}}{l_\text{eff}(s)}\cos(\gamma_y) - c\,\dot{\gamma}_y$$
+
+スケールが大きいほどリング半径が広がり，垂直長 $l_\text{eff}$ が短くなる（振り子が速くなる）．数値積分は Semi-implicit Euler 法（速度を先に更新してから位置を更新）で行い，数値的安定性を確保する．
 
 | パラメータ | 記号 | 値 | 単位 |
 |---|---|---|---|
 | 重力加速度 | $g$ | 9.81 | m/s² |
-| ケーブル長 | $l$ | 1.0 | m |
+| ケーブル長（ドローン→ペイロード） | $L$ | 1.0 | m |
+| 有効垂直振り子長（$s=1.0$ 時） | $l_\text{eff}(1)$ | $\sqrt{0.75} \approx 0.866$ | m |
+| 有効垂直振り子長（$s=0.4$ 時） | $l_\text{eff}(0.4)$ | $\sqrt{0.96} \approx 0.980$ | m |
+| 有効垂直振り子長（$s=1.5$ 時） | $l_\text{eff}(1.5)$ | $\sqrt{0.4375} \approx 0.661$ | m |
 | 粘性ダンピング係数 | $c$ | 0.03 | 1/s |
 
 ### 1.5 フォーメーションジオメトリと動的バウンディングサークル
@@ -366,23 +375,25 @@ $$A_\text{obs}^{(k)} = \left[2\Delta p_x^{(k)},\;\; 2\Delta p_y^{(k)},\;\; -2\,r
 
 #### 制約 (1)：ペイロード揺れ角 HOCBF（動的 $\gamma_\text{max}(s)$，ソフト制約）
 
-揺れ角上限をスケールに応じて動的に設定する：
+揺れ角上限はスワームリング半径とケーブル長の幾何的関係から設定する（**全長 $L$ を使用**）：
 
-$$\gamma_\text{max}(s) = \arcsin\!\left(\text{clamp}\!\left(\frac{R_\text{form} \cdot s}{l},\; 0,\; 0.95\right)\right)$$
+$$\gamma_\text{max}(s) = \arcsin\!\left(\text{clamp}\!\left(\frac{R_\text{form} \cdot s}{L},\; 0,\; 0.95\right)\right)$$
 
-この式はフォーメーション半径 $R_\text{form} \cdot s$ とケーブル長 $l$ の幾何的関係から導出される（スワームが縮小すれば許容揺れ角も小さくなる）．
+ペイロードが真下に垂れたまま最大にスワームが広がったときの幾何的な最大角度（スワームが縮小すれば許容揺れ角も小さくなる）．
 
 CBF関数（$x$ 方向の例）：
 
 $$h_x = \gamma_\text{max}(s)^2 - \gamma_x^2$$
 
-これを2段 HOCBF に展開し，制御依存係数と定数項を求めると：
+これを2段 HOCBF に展開し，制御依存係数と定数項を求めると（**振り子の動力学には有効垂直長 $l_\text{eff}(s)$ を使用**）：
 
-$$C_x = \frac{2\gamma_x \cos(\gamma_x)}{l}, \qquad C_x \cdot a_{cx} + D_x \geq 0 - \delta_x$$
+$$C_x = \frac{2\gamma_x \cos(\gamma_x)}{l_\text{eff}(s)}, \qquad C_x \cdot a_{cx} + D_x \geq 0 - \delta_x$$
 
-$$D_x = -2\dot{\gamma}_x^2 + \frac{2\gamma_x g}{l}\sin(\gamma_x) + 2\gamma_x c\,\dot{\gamma}_x + (\alpha_1+\alpha_2)(-2\gamma_x\dot{\gamma}_x) + \alpha_1\alpha_2\, h_x$$
+$$D_x = -2\dot{\gamma}_x^2 + \frac{2\gamma_x g}{l_\text{eff}(s)}\sin(\gamma_x) + 2\gamma_x c\,\dot{\gamma}_x + (\alpha_1+\alpha_2)(-2\gamma_x\dot{\gamma}_x) + \alpha_1\alpha_2\, h_x$$
 
 $\alpha_1 = \alpha_2 = 2.0$（ペイロード HOCBF 係数）．$y$ 方向も同様．
+
+> **ノート**: $\gamma_\text{max}$ の計算（角度の幾何的上限）は全長 $L$ を使い，CBF の drift 項・係数（振り子の固有振動数に相当）は有効垂直長 $l_\text{eff}(s) = \sqrt{L^2 - (R_\text{form} \cdot s)^2}$ を使う．スケールが大きいほど $l_\text{eff}$ が短くなり，CBF の係数が大きくなる（より敏感な安全制約）．
 
 #### 解法：Dykstra交互射影法
 

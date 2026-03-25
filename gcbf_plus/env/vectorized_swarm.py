@@ -334,7 +334,10 @@ class VectorizedSwarmEnv:
         self._scale_states = torch.stack([new_s, new_s_dot], dim=-1)
 
         # ── Payload swing dynamics (Semi-implicit Euler) ──
-        l = self.params["cable_length"]
+        cable_length = self.params["cable_length"]
+        R_form = self.params["R_form"]
+        s_cur = self._scale_states[:, :, 0]  # (B, n)
+        l = torch.sqrt(torch.clamp(cable_length**2 - (R_form * s_cur)**2, min=1e-4))  # l_eff(s): (B, n)
         g = self.params["gravity"]
         c = self.params["payload_damping"]
         ps = self._payload_states

@@ -123,12 +123,14 @@ def _solve_qp_exact_single(
     # Payload HOCBF (soft, with slack delta)
     if payload_i is not None:
         gx, gy, gx_dot, gy_dot = payload_i
-        l, g_val, c_damp = cable_length, gravity, payload_damping
+        g_val, c_damp = gravity, payload_damping
+        # l_eff(s): effective vertical pendulum length
+        l = np.sqrt(max(cable_length**2 - (R_form * s_i)**2, 1e-4))
         a1, a2 = hocbf_alpha1, hocbf_alpha2
         alpha_sum_h = a1 + a2
         alpha_prod_h = a1 * a2
 
-        ratio = np.clip(R_form * s_i / l, 0.0, 0.95)
+        ratio = np.clip(R_form * s_i / cable_length, 0.0, 0.95)  # angle bound uses full cable
         gamma_dyn = np.arcsin(ratio)
 
         h_x = gamma_dyn ** 2 - gx ** 2
