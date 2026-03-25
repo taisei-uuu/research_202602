@@ -47,7 +47,7 @@ class VectorizedSwarmEnv:
         "n_obs": 2,
         "obs_len_range": (0.4, 1.0),
         "mass": 0.1,
-        "u_max": 0.3,
+        "u_max": 9.0,
         "v_max": 1.0,
         # Scale limits
         "s_min": 0.4,

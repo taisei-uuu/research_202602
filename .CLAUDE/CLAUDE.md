@@ -87,7 +87,7 @@ Attention-based message passing. For each layer:
 
 ### System Parameters
 
-Δt=0.05s, m=0.1kg, u_max=0.3N, v_max=1.0m/s, arena=15×15m, R_form=0.5m, s∈[0.4,1.5], ṡ_max=1.0, R_comm=3.0m, cable l=1.0m, g=9.81m/s².
+Δt=0.05s, m=0.1kg, u_max=9.0m/s², v_max=1.0m/s, arena=15×15m, R_form=0.5m, s∈[0.4,1.5], ṡ_max=1.0, R_comm=3.0m, cable l=1.0m, g=9.81m/s².
 
 Optimizer: Adam, lr=3e-4, gradient clip max_norm=2.0.
 

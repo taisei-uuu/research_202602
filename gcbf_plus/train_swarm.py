@@ -63,8 +63,6 @@ def _nominal_accel(
     s_max: float = 1.5,
     K_s_pos: float = 1.0,
     u_max: float = None,
-    mass: float = 0.1,
-    n_drones: int = 3,
     use_payload: bool = True,
 ) -> torch.Tensor:
     """Level 1+2: GNN velocity commands → PD → nominal acceleration (pre-clamped).
@@ -77,9 +75,7 @@ def _nominal_accel(
     scale_states : (..., 2) — [s, s_dot]
     s_max : float — maximum scale value (expansion target).
     K_s_pos : float — proportional gain for scale expansion PD.
-    u_max : float or None — per-motor thrust limit. If given, pre-clamp output.
-    mass  : float — per-drone mass (for computing feasible acceleration).
-    n_drones : int — drones per swarm (default 3).
+    u_max : float or None — max acceleration [m/s²]. If given, pre-clamp output.
 
     Returns
     -------
@@ -113,18 +109,17 @@ def _nominal_accel(
 
     # Pre-clamp: keep u_nom within physically feasible range (out-of-place for autograd)
     if u_max is not None:
-        a_max_trans = n_drones * u_max / mass * 0.7   # 70% margin for translation
-        a_max_scale = n_drones * u_max / mass * 0.3   # 30% margin for scale
-        
+        a_max_trans = u_max * 0.7   # 70% for translation
+        a_max_scale = u_max * 0.3   # 30% for scale
+
         # Payload-aware clamping: when payload is active the HOCBF limits
-        # acceleration to ~0.5 m/s^2, so pre-clamp u_nom to avoid massive
-        # QP intervention that teaches the GNN a meaningless bias.
+        # acceleration, so pre-clamp u_nom to avoid massive QP intervention.
         if use_payload:
             a_max_payload = 0.5
             actual_a_max_t = min(a_max_trans, a_max_payload)
         else:
             actual_a_max_t = a_max_trans
-        
+
         clamped_trans = u_nom[..., :2].clamp(-actual_a_max_t, actual_a_max_t)
         clamped_scale = u_nom[..., 2:].clamp(-a_max_scale, a_max_scale)
         u_nom = torch.cat([clamped_trans, clamped_scale], dim=-1)
@@ -206,7 +201,7 @@ def train(
     K_v = vec_env.params.get("K_v", 2.0)
     K_s = vec_env.params.get("K_s", 2.0)
 
-    # GNN acceleration output scale: conservative (~1/3 of physical limit u_max/m = 3.0 m/s²)
+    # GNN acceleration output scale: conservative (~1/9 of physical limit u_max = 9.0 m/s²)
     a_max_gnn = 1.0    # m/s²  — translation acceleration offset
     a_max_gnn_s = 0.5  # s⁻²  — scale acceleration offset
 
@@ -292,7 +287,7 @@ def train(
                 u_nom = _nominal_accel(
                     pi_scaled, vec_env._agent_states, vec_env._goal_states,
                     vec_env._scale_states, K_pos, K_v, K_s, v_max,
-                    s_max=s_max, u_max=u_max, mass=mass, use_payload=use_payload,
+                    s_max=s_max, u_max=u_max, use_payload=use_payload,
                 )
 
                 # Level 3: QP solve
@@ -442,7 +437,7 @@ def train(
                 u_nom = _nominal_accel(
                     pi_scaled, mb_agent, mb_goal,
                     mb_scale, K_pos, K_v, K_s, v_max,
-                    s_max=s_max, u_max=u_max, mass=mass, use_payload=use_payload,
+                    s_max=s_max, u_max=u_max, use_payload=use_payload,
                 )
                 u_nom_flat = u_nom.reshape(mb_size * num_agents, 3)
 
