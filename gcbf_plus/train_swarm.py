@@ -144,6 +144,7 @@ def train(
     device: str = "auto",
     use_payload: bool = True,
     no_scale: bool = False,
+    a_max_gnn_arg: float = 2.0,
 ) -> Dict[str, list]:
     """Train hierarchical velocity-command swarm policy."""
     torch.manual_seed(seed)
@@ -195,9 +196,9 @@ def train(
     K_v = vec_env.params.get("K_v", 2.0)
     K_s = vec_env.params.get("K_s", 2.0)
 
-    # GNN acceleration output scale: conservative (~1/9 of physical limit u_max = 9.0 m/s²)
-    a_max_gnn = 1.0    # m/s²  — translation acceleration offset
-    a_max_gnn_s = 0.5  # s⁻²  — scale acceleration offset
+    # GNN acceleration output scale
+    a_max_gnn = a_max_gnn_arg      # m/s²  — translation acceleration offset
+    a_max_gnn_s = 0.5              # s⁻²  — scale acceleration offset
 
     # Payload / HOCBF constants
     cable_length = vec_env.params["cable_length"]
@@ -665,10 +666,13 @@ def main():
                         help="Disable payload dynamics and HOCBF constraint")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix formation scale at s=1.0 (ablation: no scale deformation)")
+    parser.add_argument("--a_max_gnn", type=float, default=2.0,
+                        help="GNN translation acceleration output scale in m/s² (default 2.0)")
     args = parser.parse_args()
     a = vars(args)
     a["checkpoint_path"] = a.pop("checkpoint")
     a["use_payload"] = not a.pop("no_payload")
+    a["a_max_gnn_arg"] = a.pop("a_max_gnn")
     train(**a)
 
 
