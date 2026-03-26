@@ -1,0 +1,20 @@
+{
+  "_comment": "2 swarms in a narrow horizontal corridor heading toward each other. Pure QP deadlocks symmetrically (agent-agent CBF pushes sideways, obstacle CBF blocks sideways movement). GNN should learn one agent yields while the other passes first.",
+  "_arena": "7.5x7.5m",
+  "agents": [
+    [1.0, 3.75],
+    [6.5, 3.75]
+  ],
+  "goals": [
+    [6.5, 3.75],
+    [1.0, 3.75]
+  ],
+  "obstacles": [
+    {"center": [2.0,  4.9], "radius": 0.45},
+    {"center": [3.75, 4.9], "radius": 0.45},
+    {"center": [5.5,  4.9], "radius": 0.45},
+    {"center": [2.0,  2.6], "radius": 0.45},
+    {"center": [3.75, 2.6], "radius": 0.45},
+    {"center": [5.5,  2.6], "radius": 0.45}
+  ]
+}

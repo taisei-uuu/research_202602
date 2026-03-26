@@ -1,0 +1,18 @@
+{
+  "_comment": "1 swarm crossing diagonally (bottom-left only), obstacles flanking the path.",
+  "_arena": "7.5x7.5m",
+  "agents": [
+    [1.0, 1.0]
+  ],
+  "goals": [
+    [6.5, 6.5]
+  ],
+  "obstacles": [
+    {"center": [1.74, 3.01], "radius": 0.2},
+    {"center": [3.01, 1.74], "radius": 0.2},
+    {"center": [2.91, 4.60], "radius": 0.2},
+    {"center": [4.60, 2.91], "radius": 0.2},
+    {"center": [4.49, 5.76], "radius": 0.2},
+    {"center": [5.76, 4.49], "radius": 0.2}
+  ]
+}
