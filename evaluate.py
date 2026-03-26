@@ -315,9 +315,8 @@ class AffinePolicy(MethodController):
 
             _u_max = env.params.get("u_max")
             if _u_max is not None:
-                _mass  = env.params.get("mass", 0.1)
-                a_max_t = 3 * _u_max / _mass * 0.7
-                a_max_s = 3 * _u_max / _mass * 0.3
+                a_max_t = _u_max * 0.7
+                a_max_s = _u_max * 0.3
                 u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
                 u_nom[:, 2]  = u_nom[:,  2].clamp(-a_max_s, a_max_s)
 

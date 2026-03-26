@@ -524,11 +524,7 @@ def run_simulation(
                 if _u_max is not None:
                     a_max_t = _u_max * 0.7
                     a_max_s = _u_max * 0.3
-                    if _use_payload:
-                        actual_a_max_t = min(a_max_t, 0.5)
-                    else:
-                        actual_a_max_t = a_max_t
-                    u_nom[:, :2] = u_nom[:, :2].clamp(-actual_a_max_t, actual_a_max_t)
+                    u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
                     u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
                 ps = env.payload_states if _use_payload else None
