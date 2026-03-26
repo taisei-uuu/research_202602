@@ -480,7 +480,7 @@ def evaluate_episode(
     env: SwarmIntegrator,
     seed: int,
     max_steps: int = 512,
-    goal_radius: float = 0.5,
+    goal_radius: float = 0.3,
 ):
     """Run one episode, return metrics dict."""
     env.reset(seed=seed)
@@ -490,16 +490,20 @@ def evaluate_episode(
     total_control_effort = 0.0
     min_dist = float("inf")
     collision_count = 0
+    gamma_viol_count = 0
     goal_reached_step = None
     max_gamma = 0.0
     gamma_values = []
     scale_values = []
 
+    R_form = env.params.get("R_form", 0.5)
+    cable_length = env.params.get("cable_length", 1.0)
+
     for t in range(max_steps):
         action = method.select_action(env)
         _, info = env.step(action)
 
-        # Metrics
+        # Control effort: ||a_c||  (translation only, per agent, summed over agents and time)
         total_control_effort += action[:, :2].norm(dim=-1).sum().item()
 
         # Min inter-agent distance
@@ -510,19 +514,26 @@ def evaluate_episode(
             dist = dist + torch.eye(n) * 1e6
             min_dist = min(min_dist, dist.min().item())
 
-        # Collision check
+        # Safety Rate: fraction of timesteps with no collision
         if env.unsafe_mask().any():
             collision_count += 1
 
         # Scale tracking
-        scale_values.append(env.scale_states[:, 0].clone())
+        s_curr = env.scale_states[:, 0].clone()
+        scale_values.append(s_curr)
 
-        # Payload swing
+        # Payload swing: gamma = sqrt(gamma_x^2 + gamma_y^2)
         gamma = torch.sqrt(env.payload_states[:, 0]**2 + env.payload_states[:, 1]**2)
         max_gamma = max(max_gamma, gamma.max().item())
         gamma_values.append(gamma.mean().item())
 
-        # Goal distance
+        # gamma_viol: timesteps where gamma > gamma_max(s) for any agent
+        ratio = (R_form * s_curr / cable_length).clamp(0.0, 0.9999)
+        gamma_max_s = torch.arcsin(ratio)
+        if (gamma > gamma_max_s).any():
+            gamma_viol_count += 1
+
+        # Goal check: all agents within goal_radius
         goal_dist = torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1)
         if goal_dist.max() < goal_radius and goal_reached_step is None:
             goal_reached_step = t
@@ -530,9 +541,7 @@ def evaluate_episode(
         if info["done"]:
             break
 
-    # Final goal distance
-    final_goal_dist = torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1)
-
+    total_steps = t + 1
     scale_stack = torch.stack(scale_values)  # (T, n)
 
     # Infeasibility (only populated when use_exact_qp=True)
@@ -542,17 +551,17 @@ def evaluate_episode(
 
     return {
         "success": goal_reached_step is not None,
-        "collision_count": collision_count,
-        "safety_rate": 1.0 - (collision_count / (t + 1)),
-        "min_distance": min_dist if min_dist < 1e5 else float("nan"),
-        "control_effort": total_control_effort,
-        "goal_time": goal_reached_step,
-        "final_goal_dist": final_goal_dist.mean().item(),
-        "max_gamma": max_gamma,
+        "safety_rate": 1.0 - (collision_count / total_steps),
         "mean_gamma": float(np.mean(gamma_values)) if gamma_values else 0.0,
-        "scale_mean": scale_stack.mean().item(),
+        "max_gamma": max_gamma,
+        "gamma_viol": gamma_viol_count / total_steps,
         "scale_min": scale_stack.min().item(),
         "scale_max": scale_stack.max().item(),
+        "control_effort": total_control_effort,
+        "goal_time": goal_reached_step,
+        # extras
+        "min_distance": min_dist if min_dist < 1e5 else float("nan"),
+        "final_goal_dist": torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1).mean().item(),
         "qp_infeasible_count": infeasible,
         "qp_total_calls": total_calls,
         "qp_infeasibility_rate": infeasibility_rate,
@@ -672,6 +681,8 @@ def main():
         agg = {}
         for key in metrics_list[0]:
             vals = [m[key] for m in metrics_list if m[key] is not None]
+            if not vals:
+                continue
             if isinstance(vals[0], bool):
                 agg[key] = sum(vals) / len(vals)
             elif isinstance(vals[0], (int, float)):
@@ -681,15 +692,27 @@ def main():
                     agg[f"{key}_std"] = np.std(vals)
 
         results[mname] = agg
-        print(f"    Success: {agg.get('success', 0):.1%}")
-        print(f"    Safety:  {agg.get('safety_rate_mean', 0):.3f}")
-        print(f"    FinalGoalDist: {agg.get('final_goal_dist_mean', 0):.3f}")
-        print(f"    MaxGamma: {agg.get('max_gamma_mean', 0):.3f}")
-        print(f"    Scale: [{agg.get('scale_min_mean', 1):.2f}, {agg.get('scale_max_mean', 1):.2f}]")
+        sr   = agg.get("success", 0) * 100
+        safe = agg.get("safety_rate_mean", 0) * 100
+        gm   = agg.get("mean_gamma_mean", 0)
+        gmx  = agg.get("max_gamma_mean", 0)
+        gv   = agg.get("gamma_viol_mean", 0) * 100
+        smin = agg.get("scale_min_mean", float("nan"))
+        smax = agg.get("scale_max_mean", float("nan"))
+        ce   = agg.get("control_effort_mean", 0)
+        gt   = agg.get("goal_time_mean", float("nan"))
+        print(f"    Success Rate    : {sr:.1f} %")
+        print(f"    Safety Rate     : {safe:.1f} %")
+        print(f"    gamma_mean      : {gm:.4f} rad")
+        print(f"    gamma_max       : {gmx:.4f} rad")
+        print(f"    gamma_viol      : {gv:.1f} %")
+        print(f"    Scale [min,max] : [{smin:.3f}, {smax:.3f}]")
+        print(f"    Control Effort  : {ce:.3f} m/s²")
+        print(f"    Goal Time       : {gt:.1f} step")
         if args.exact_qp and _QUADPROG_AVAILABLE:
             inf_rate = agg.get("qp_infeasibility_rate_mean", float("nan"))
             inf_total = agg.get("qp_infeasible_count_mean", 0)
-            print(f"    QP Infeasibility: {inf_rate:.1%}  (avg {inf_total:.1f} infeasible solves/episode)")
+            print(f"    QP Infeasibility: {inf_rate:.1%}  (avg {inf_total:.1f} infeasible/episode)")
 
     # Save
     with open(args.save_json, "w") as f:
