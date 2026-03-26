@@ -112,13 +112,7 @@ def _nominal_accel(
         a_max_trans = u_max * 0.7   # 70% for translation
         a_max_scale = u_max * 0.3   # 30% for scale
 
-        # Payload-aware clamping: when payload is active the HOCBF limits
-        # acceleration, so pre-clamp u_nom to avoid massive QP intervention.
-        if use_payload:
-            a_max_payload = 0.5
-            actual_a_max_t = min(a_max_trans, a_max_payload)
-        else:
-            actual_a_max_t = a_max_trans
+        actual_a_max_t = a_max_trans
 
         clamped_trans = u_nom[..., :2].clamp(-actual_a_max_t, actual_a_max_t)
         clamped_scale = u_nom[..., 2:].clamp(-a_max_scale, a_max_scale)
@@ -538,6 +532,9 @@ def train(
                 qp_intervention = (u_nom_flat - u_qp_flat).pow(2).sum(dim=-1)
                 batch_info["qp_cut/mean"] = qp_intervention.mean().item()
                 batch_info["qp_cut/max"] = qp_intervention.max().item()
+                # GNN output magnitude (tanh, before physical scaling)
+                batch_info["gnn/pi_mean"] = pi_agents.abs().mean().item()
+                batch_info["gnn/pi_max"] = pi_agents.abs().max().item()
 
                 optim.zero_grad()
                 loss.backward()
@@ -581,10 +578,13 @@ def train(
             else:
                 payload_str = " | G: (no payload)"
             arrival_str = f"{avg_info.get('loss/arrival', 0.0):.4f}"
+            pi_mean = avg_info.get("gnn/pi_mean", 0.0)
+            pi_max  = avg_info.get("gnn/pi_max",  0.0)
             print(f"Step {step:5d} | "
                   f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ar:{arrival_str}, ef:{avg_info.get('loss/effort',0):.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
-                  f"{payload_str}")
+                  f"{payload_str}"
+                  f" | GNN: {pi_mean:.3f}/{pi_max:.3f}")
             g_cnt = int(info.get("reset/goal", 0))
             c_cnt = int(info.get("reset/collision", 0))
             t_cnt = int(info.get("reset/timeout", 0))
