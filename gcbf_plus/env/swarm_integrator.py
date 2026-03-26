@@ -414,9 +414,10 @@ class SwarmIntegrator:
         """
         n = self.num_agents
         s_vals = self.scale_states[:, 0]
-        sensing_radii = self.comm_radius * s_vals
+        R_form = self.params.get("R_form", 0.5)
+        sensing_radii = R_form * s_vals + (self.comm_radius - R_form)
         agent_pos = self.agent_states[:, :2]
-        
+
         all_agent_hits = []
         
         # Angles for radial beams
@@ -470,7 +471,8 @@ class SwarmIntegrator:
         n = self.num_agents
         device = self.agent_states.device
         s_vals = self.scale_states[:, 0]
-        sensing_radii = self.comm_radius * s_vals
+        R_form = self.params.get("R_form", 0.5)
+        sensing_radii = R_form * s_vals + (self.comm_radius - R_form)
         agent_pos = self.agent_states[:, :2]
 
         angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
@@ -509,7 +511,8 @@ class SwarmIntegrator:
         
         # 2. Build graph with per-agent hit points
         s = self.scale_states[:, 0]
-        dyn_cr = self.comm_radius * s
+        R_form = self.params.get("R_form", 0.5)
+        dyn_cr = R_form * s + (self.comm_radius - R_form)
         
         use_payload = self.params.get("use_payload", True)
         return build_swarm_graph_from_states(

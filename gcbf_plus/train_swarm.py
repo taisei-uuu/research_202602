@@ -412,7 +412,8 @@ def train(
                 mb_obs_hits = all_obs_hits[idx]  # (mb, n, nb, 2)
 
                 # ── Build graph (dynamic comm_radius) ──
-                dyn_cr = vec_env.comm_radius * mb_scale[:, :, 0]  # (mb, n)
+                _R_form = vec_env.params.get("R_form", 0.5)
+                dyn_cr = _R_form * mb_scale[:, :, 0] + (vec_env.comm_radius - _R_form)  # (mb, n)
                 mega = build_vectorized_swarm_graph(
                     agent_states=mb_agent,
                     goal_states=mb_goal,

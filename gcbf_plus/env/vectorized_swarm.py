@@ -128,9 +128,11 @@ class VectorizedSwarmEnv:
         return self.params["comm_radius"]
 
     def dynamic_comm_radius(self) -> torch.Tensor:
-        """Dynamic comm_radius: comm_base * s per agent.  Returns (B, n)."""
+        """Dynamic comm_radius: R_form*s + D per agent.  Returns (B, n).
+        D = comm_radius_base - R_form is the fixed hardware sensing range."""
         s = self._scale_states[:, :, 0]  # (B, n)
-        return self.comm_radius * s
+        R_form = self.params.get("R_form", 0.5)
+        return R_form * s + (self.comm_radius - R_form)
 
     @property
     def n_obs(self) -> int:
@@ -451,7 +453,8 @@ class VectorizedSwarmEnv:
 
         pos = self._agent_states[:, :, :2]  # (B, n, 2)
         s = self._scale_states[:, :, 0]     # (B, n)
-        sensing_radius = (self.comm_radius * s).unsqueeze(-1)  # (B, n, 1)
+        R_form = self.params.get("R_form", 0.5)
+        sensing_radius = (R_form * s + (self.comm_radius - R_form)).unsqueeze(-1)  # (B, n, 1)
 
         # 1. Setup beams
         angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
@@ -549,7 +552,8 @@ class VectorizedSwarmEnv:
         flat_hits = hits.view(B, n * nb, 4)
         
         s = scale_states[:, :, 0]
-        dyn_cr = self.comm_radius * s
+        R_form = self.params.get("R_form", 0.5)
+        dyn_cr = R_form * s + (self.comm_radius - R_form)
         
         use_payload = self.params.get("use_payload", True)
         return build_vectorized_swarm_graph(

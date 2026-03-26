@@ -140,7 +140,8 @@ $s=1.0$ のとき $r_\text{swarm} = 0.7$ m，$s_\text{min}=0.4$ のとき $0.4$ 
 | タイムステップ | $\Delta t$ | 0.05 | s |
 | 環境サイズ | — | 15.0 × 15.0 | m |
 | 最大制御入力（並進） | $u_\text{max}$ | 9.0 | m/s² |
-| 通信半径 | $R_\text{comm}$ | 3.0 | m |
+| 通信半径（ベース） | $R_\text{comm}$ | 3.0 | m |
+| 実効通信半径 | $R_\text{form} \cdot s + (R_\text{comm} - R_\text{form})$ | 2.7〜3.25 | m |
 | 障害物数 | $n_\text{obs}$ | 6 | — |
 | 最大エピソード長 | $T_\text{max}$ | 256 | ステップ |
 
@@ -229,7 +230,11 @@ $$q_k(t) = p_c(t) + s(t) \cdot \bar{q}_k$$
 
 ペイロード揺れ状態 $[\gamma_x, \gamma_y, \dot{\gamma}_x, \dot{\gamma}_y]$ をエージェントノードに付加することで，GNNが揺れを直接観測して先読み制御を学習できる．実機では $\dot{\gamma}$ はオブザーバ（カルマンフィルタ等）による推定を想定する．
 
-エッジは通信半径 $R_\text{comm} \cdot s$（スケールに応じて拡張）内にある全ノード対を接続し，エッジ特徴量は：
+エッジは実効通信半径
+
+$$R_\text{eff}(s) = R_\text{form} \cdot s + \underbrace{(R_\text{comm} - R_\text{form})}_{D = 2.5\,\text{m（固定）}}$$
+
+内にある全ノード対を接続する．$R_\text{form} \cdot s$ はフォーメーション占有半径，$D$ はハードウェア固定のセンシングレンジである（$s=1$ のとき $R_\text{eff} = R_\text{comm} = 3.0$ m）．エッジ特徴量は：
 
 $$e_{ij} = [\Delta p_x,\; \Delta p_y,\; \Delta v_x,\; \Delta v_y]^\top \in \mathbb{R}^4$$
 
