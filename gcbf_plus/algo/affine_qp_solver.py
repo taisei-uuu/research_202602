@@ -113,21 +113,35 @@ def solve_affine_qp(
         clamped_ratio = torch.clamp(ratio, 0.0, 0.95)
         gamma_dyn = torch.asin(clamped_ratio)
 
+        # dγ_max/ds and time derivatives (γ_max is time-varying via s(t))
+        safe_denom = torch.sqrt(torch.clamp(1.0 - clamped_ratio**2, min=1e-6))
+        dgamma_ds   = (R_form / cable_length) / safe_denom          # dγ_max/ds
+        d2gamma_ds2 = (R_form / cable_length)**2 * clamped_ratio / (safe_denom**3)  # d²γ_max/ds²
+        gamma_dyn_dot = dgamma_ds * s_dot                           # dγ_max/dt = (dγ_max/ds)*ṡ
+        # Coupling coefficient to a_s (same for X and Y)
+        C_s = 2.0 * gamma_dyn * dgamma_ds
+        # Extra drift from γ_max acceleration (depends on ṡ only, not γ_x/γ_y)
+        extra_drift = (2.0 * gamma_dyn_dot**2
+                       + 2.0 * gamma_dyn * d2gamma_ds2 * s_dot**2)
+
         # --- X-axis HOCBF ---
         h_x = gamma_dyn**2 - gx**2
-        h_dot_x = -2.0 * gx * gx_dot
-        # h_ddot_drift = -2*gx_dot^2 - 2*gx * (-(g/l)sin(gx) - c*gx_dot)
-        h_ddot_drift_x = -2.0 * gx_dot**2 + (2.0 * gx * g_val / l) * torch.sin(gx) + 2.0 * gx * c_damp * gx_dot
-        
+        # ḣ_x = d/dt(γ_max²) - d/dt(γ_x²) = 2*γ_max*γ̇_max - 2*γ_x*γ̇_x
+        h_dot_x = 2.0 * gamma_dyn * gamma_dyn_dot - 2.0 * gx * gx_dot
+        h_ddot_drift_x = (extra_drift
+                          - 2.0 * gx_dot**2
+                          + (2.0 * gx * g_val / l) * torch.sin(gx)
+                          + 2.0 * gx * c_damp * gx_dot)
         Cx = (2.0 * gx * torch.cos(gx)) / l
         rhs_x = h_ddot_drift_x + alpha_sum * h_dot_x + alpha_prod * h_x
 
         # --- Y-axis HOCBF ---
         h_y = gamma_dyn**2 - gy**2
-        h_dot_y = -2.0 * gy * gy_dot
-        # h_ddot_drift = -2*gy_dot^2 - 2*gy * (-(g/l)sin(gy) - c*gy_dot)
-        h_ddot_drift_y = -2.0 * gy_dot**2 + (2.0 * gy * g_val / l) * torch.sin(gy) + 2.0 * gy * c_damp * gy_dot
-        
+        h_dot_y = 2.0 * gamma_dyn * gamma_dyn_dot - 2.0 * gy * gy_dot
+        h_ddot_drift_y = (extra_drift
+                          - 2.0 * gy_dot**2
+                          + (2.0 * gy * g_val / l) * torch.sin(gy)
+                          + 2.0 * gy * c_damp * gy_dot)
         Cy = (2.0 * gy * torch.cos(gy)) / l
         rhs_y = h_ddot_drift_y + alpha_sum * h_dot_y + alpha_prod * h_y
 
@@ -162,19 +176,21 @@ def solve_affine_qp(
         if has_hocbf:
             eps_c = 1e-6
 
-            # X-axis: Cx * a_cx + rhs_x >= 0
-            c_val_x = Cx * X[:, 0] + rhs_x
-            violate_x = (c_val_x < 0) & (Cx.abs() > eps_c)
+            # X-axis: Cx * a_cx + C_s * a_s + rhs_x >= 0
+            c_val_x = Cx * X[:, 0] + C_s * X[:, 2] + rhs_x
+            violate_x = (c_val_x < 0) & ((Cx.abs() + C_s.abs()) > eps_c)
             if violate_x.any():
-                lam = torch.relu(-c_val_x / (Cx**2 + 1e-8))
+                lam = torch.relu(-c_val_x / (Cx**2 + C_s**2 + 1e-8))
                 X[violate_x, 0] += lam[violate_x] * Cx[violate_x]
+                X[violate_x, 2] += lam[violate_x] * C_s[violate_x]
 
-            # Y-axis: Cy * a_cy + rhs_y >= 0
-            c_val_y = Cy * X[:, 1] + rhs_y
-            violate_y = (c_val_y < 0) & (Cy.abs() > eps_c)
+            # Y-axis: Cy * a_cy + C_s * a_s + rhs_y >= 0
+            c_val_y = Cy * X[:, 1] + C_s * X[:, 2] + rhs_y
+            violate_y = (c_val_y < 0) & ((Cy.abs() + C_s.abs()) > eps_c)
             if violate_y.any():
-                lam = torch.relu(-c_val_y / (Cy**2 + 1e-8))
+                lam = torch.relu(-c_val_y / (Cy**2 + C_s**2 + 1e-8))
                 X[violate_y, 1] += lam[violate_y] * Cy[violate_y]
+                X[violate_y, 2] += lam[violate_y] * C_s[violate_y]
 
         # ------------------------------------------------------------
         # 2. Scale CBF constraints

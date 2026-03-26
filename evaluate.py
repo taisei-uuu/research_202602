@@ -133,23 +133,34 @@ def _solve_qp_exact_single(
         ratio = np.clip(R_form * s_i / cable_length, 0.0, 0.95)  # angle bound uses full cable
         gamma_dyn = np.arcsin(ratio)
 
+        # dγ_max/ds and time derivatives (γ_max is time-varying via s(t))
+        safe_denom = np.sqrt(max(1.0 - ratio**2, 1e-6))
+        dgamma_ds   = (R_form / cable_length) / safe_denom
+        d2gamma_ds2 = (R_form / cable_length)**2 * ratio / safe_denom**3
+        gamma_dyn_dot = dgamma_ds * sd_i                 # dγ_max/dt
+        C_s_h = 2.0 * gamma_dyn * dgamma_ds              # coupling to a_s
+        extra_drift = (2.0 * gamma_dyn_dot**2
+                       + 2.0 * gamma_dyn * d2gamma_ds2 * sd_i**2)
+
         h_x = gamma_dyn ** 2 - gx ** 2
-        h_dot_x = -2.0 * gx * gx_dot
-        h_ddot_drift_x = (-2.0 * gx_dot ** 2
+        h_dot_x = 2.0 * gamma_dyn * gamma_dyn_dot - 2.0 * gx * gx_dot
+        h_ddot_drift_x = (extra_drift
+                          - 2.0 * gx_dot ** 2
                           + 2.0 * gx * g_val / l * np.sin(gx)
                           + 2.0 * gx * c_damp * gx_dot)
         C_x = (2.0 * gx * np.cos(gx)) / l
         rhs_x = h_ddot_drift_x + alpha_sum_h * h_dot_x + alpha_prod_h * h_x
-        add([C_x, 0, 0, 1, 0], -rhs_x)
+        add([C_x, 0, C_s_h, 1, 0], -rhs_x)
 
         h_y = gamma_dyn ** 2 - gy ** 2
-        h_dot_y = -2.0 * gy * gy_dot
-        h_ddot_drift_y = (-2.0 * gy_dot ** 2
+        h_dot_y = 2.0 * gamma_dyn * gamma_dyn_dot - 2.0 * gy * gy_dot
+        h_ddot_drift_y = (extra_drift
+                          - 2.0 * gy_dot ** 2
                           + 2.0 * gy * g_val / l * np.sin(gy)
                           + 2.0 * gy * c_damp * gy_dot)
         C_y = (2.0 * gy * np.cos(gy)) / l
         rhs_y = h_ddot_drift_y + alpha_sum_h * h_dot_y + alpha_prod_h * h_y
-        add([0, C_y, 0, 0, 1], -rhs_y)
+        add([0, C_y, C_s_h, 0, 1], -rhs_y)
 
         add([0, 0, 0, 1, 0], 0.0)
         add([0, 0, 0, 0, 1], 0.0)

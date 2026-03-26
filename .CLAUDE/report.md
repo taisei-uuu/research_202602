@@ -390,15 +390,23 @@ CBF関数（$x$ 方向の例）：
 
 $$h_x = \gamma_\text{max}(s)^2 - \gamma_x^2$$
 
-これを2段 HOCBF に展開し，制御依存係数と定数項を求めると（**振り子の動力学には有効垂直長 $l_\text{eff}(s)$ を使用**）：
+$\gamma_\text{max}$ は $s(t)$ の関数であるため，時間微分には $\dot{\gamma}_\text{max}$ が現れる：
 
-$$C_x = \frac{2\gamma_x \cos(\gamma_x)}{l_\text{eff}(s)}, \qquad C_x \cdot a_{cx} + D_x \geq 0 - \delta_x$$
+$$\dot{h}_x = 2\,\gamma_\text{max}\,\dot{\gamma}_\text{max} - 2\,\gamma_x\,\dot{\gamma}_x, \qquad \dot{\gamma}_\text{max} = \frac{\partial \gamma_\text{max}}{\partial s}\dot{s} = \frac{R_\text{form}/L}{\sqrt{1-(R_\text{form}s/L)^2}}\,\dot{s}$$
 
-$$D_x = -2\dot{\gamma}_x^2 + \frac{2\gamma_x g}{l_\text{eff}(s)}\sin(\gamma_x) + 2\gamma_x c\,\dot{\gamma}_x + (\alpha_1+\alpha_2)(-2\gamma_x\dot{\gamma}_x) + \alpha_1\alpha_2\, h_x$$
+これを2段 HOCBF に展開すると，**制御入力 $a_{cx}$ と $a_s$ の両方**が現れる（振り子の動力学には有効垂直長 $l_\text{eff}(s)$ を使用）：
 
-$\alpha_1 = \alpha_2 = 2.0$（ペイロード HOCBF 係数）．$y$ 方向も同様．
+$$C_x \cdot a_{cx} + C_s \cdot a_s + D_x \geq -\delta_x$$
 
-> **ノート**: $\gamma_\text{max}$ の計算（角度の幾何的上限）は全長 $L$ を使い，CBF の drift 項・係数（振り子の固有振動数に相当）は有効垂直長 $l_\text{eff}(s) = \sqrt{L^2 - (R_\text{form} \cdot s)^2}$ を使う．スケールが大きいほど $l_\text{eff}$ が短くなり，CBF の係数が大きくなる（より敏感な安全制約）．
+$$C_x = \frac{2\gamma_x \cos(\gamma_x)}{l_\text{eff}(s)}, \qquad C_s = 2\,\gamma_\text{max}\,\frac{\partial\gamma_\text{max}}{\partial s}$$
+
+$$D_x = \underbrace{2\dot{\gamma}_\text{max}^2 + 2\gamma_\text{max}\frac{\partial^2\gamma_\text{max}}{\partial s^2}\dot{s}^2}_{\gamma_\text{max}\text{ 加速度由来}}
+       - 2\dot{\gamma}_x^2 + \frac{2\gamma_x g}{l_\text{eff}}\sin\gamma_x + 2\gamma_x c\,\dot{\gamma}_x
+       + (\alpha_1+\alpha_2)\dot{h}_x + \alpha_1\alpha_2\, h_x$$
+
+$\alpha_1 = \alpha_2 = 2.0$（ペイロード HOCBF 係数）．$y$ 方向も同様（$C_s$ は X・Y で共有）．
+
+> **ノート**: $C_s > 0$ であるため，スワームが拡張中（$\dot{s}>0$）はペイロード制約が緩和される方向（$a_s>0$ が許容）という物理的に自然な性質を持つ．スケールが増加すると $\gamma_\text{max}$ が増加し，バリアに余裕が生まれるため，制約は自動的に緩くなる．
 
 #### 解法：Dykstra交互射影法
 
