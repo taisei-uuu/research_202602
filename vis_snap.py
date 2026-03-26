@@ -145,13 +145,6 @@ def plot_snapshot(
                 markerfacecolor=colors[i], markeredgecolor="white",
                 markeredgewidth=1.2, zorder=6)
 
-    # ── Colorbar (scale) ──────────────────────────────────────────────────
-    sm = cm.ScalarMappable(cmap=cmap, norm=scale_norm)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label("Formation scale  s", fontsize=11)
-    cbar.ax.tick_params(labelsize=9)
-
     # ── Legend ────────────────────────────────────────────────────────────
     handles = []
     for i in range(N):
