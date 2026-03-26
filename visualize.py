@@ -817,10 +817,10 @@ def create_video(
             cx = trajectories[sim_step, i, 0]
             cy = trajectories[sim_step, i, 1]
             sensing_circles[i].center = (cx, cy)
-            # Dynamic sensing radius: comm_radius * s
+            # Dynamic sensing radius: R_form * s + (comm_radius - R_form)
             if scale_traj is not None and sim_step < scale_traj.shape[0]:
                 s_sense = float(scale_traj[sim_step, i, 0])
-                sensing_circles[i].set_radius(comm_radius * s_sense)
+                sensing_circles[i].set_radius(R_form * s_sense + (comm_radius - R_form))
 
             if is_swarm:
                 # Get current scale
@@ -1044,7 +1044,7 @@ def plot_trajectories(
         if scale_traj is not None:
             s_final_i = float(scale_traj[-1, i, 0])
         sc = plt.Circle((finals[i, 0], finals[i, 1]),
-                        comm_radius * s_final_i,
+                        R_form * s_final_i + (comm_radius - R_form),
                         fill=False, linestyle="--", linewidth=0.8,
                         edgecolor=colors[i], alpha=0.25, zorder=3)
         ax.add_patch(sc)
