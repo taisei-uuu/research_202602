@@ -177,9 +177,9 @@ def _solve_qp_exact_single(
 
     try:
         sol = quadprog.solve_qp(G, a_vec, C_mat, b_vec)
-        return sol[0][:3].astype(np.float32)
+        return sol[0][:3].astype(np.float32), False
     except Exception:
-        return u_nom_i[:3].astype(np.float32)
+        return u_nom_i[:3].astype(np.float32), True
 
 
 def solve_affine_qp_exact(
@@ -193,10 +193,13 @@ def solve_affine_qp_exact(
     alpha1_scale=2.0, alpha2_scale=2.0,
     alpha1_obs=0.8, alpha2_obs=0.8,
     hocbf_alpha1=2.0, hocbf_alpha2=2.0,
-) -> torch.Tensor:
-    """Exact QP solver (quadprog). Loops over agents."""
+) -> tuple:
+    """Exact QP solver (quadprog). Loops over agents.
+    Returns: (u_tensor, n_infeasible) where n_infeasible is the number of agents
+    for which the QP was infeasible and fell back to u_nom."""
     N = u_nom.shape[0]
     results = []
+    n_infeasible = 0
 
     for i in range(N):
         u_nom_i = u_nom[i].numpy().astype(np.float64)
@@ -218,7 +221,7 @@ def solve_affine_qp_exact(
         osd = other_agent_s_dot[i].numpy().astype(np.float64) if other_agent_s_dot is not None else None
         pay_i = payload_states[i].numpy().astype(np.float64) if payload_states is not None else None
 
-        sol_i = _solve_qp_exact_single(
+        sol_i, infeasible = _solve_qp_exact_single(
             u_nom_i, s_i, sd_i,
             obs_i, pos_i, vel_i,
             op, ov, os_, osd,
@@ -231,8 +234,10 @@ def solve_affine_qp_exact(
             slack_weight, u_max,
         )
         results.append(sol_i)
+        if infeasible:
+            n_infeasible += 1
 
-    return torch.tensor(np.stack(results), dtype=torch.float32)
+    return torch.tensor(np.stack(results), dtype=torch.float32), n_infeasible
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -251,7 +256,8 @@ class MethodController(ABC):
     name: str = "unnamed"
 
     def reset(self, env: SwarmIntegrator, **kwargs: Any):
-        pass
+        self.infeasible_count: int = 0
+        self.total_qp_calls: int = 0
 
     @abstractmethod
     def select_action(self, env: SwarmIntegrator) -> torch.Tensor:
@@ -334,7 +340,7 @@ class AffinePolicy(MethodController):
                 other_pos = other_vel = other_s = other_sd = None
 
             if self.use_exact_qp and _QUADPROG_AVAILABLE:
-                u_qp = solve_affine_qp_exact(
+                u_qp, n_inf = solve_affine_qp_exact(
                     u_nom=u_nom,
                     obs_hits=lidar_hits,
                     agent_pos=pos, agent_vel=v_current,
@@ -350,6 +356,8 @@ class AffinePolicy(MethodController):
                     payload_damping=env.params["payload_damping"],
                     u_max=_u_max,
                 )
+                self.infeasible_count += n_inf
+                self.total_qp_calls += n
             else:
                 if self.use_exact_qp and not _QUADPROG_AVAILABLE:
                     print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
@@ -412,7 +420,7 @@ class HOCBFWithLQR(MethodController):
                 other_pos = other_vel = other_s = other_sd = None
 
             if self.use_exact_qp and _QUADPROG_AVAILABLE:
-                u_qp = solve_affine_qp_exact(
+                u_qp, n_inf = solve_affine_qp_exact(
                     u_nom=u_ref,
                     obs_hits=lidar_hits,
                     agent_pos=pos, agent_vel=vel,
@@ -428,6 +436,8 @@ class HOCBFWithLQR(MethodController):
                     payload_damping=env.params["payload_damping"],
                     u_max=env.params.get("u_max"),
                 )
+                self.infeasible_count += n_inf
+                self.total_qp_calls += n
             else:
                 if self.use_exact_qp and not _QUADPROG_AVAILABLE:
                     print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
@@ -525,6 +535,12 @@ def evaluate_episode(
     final_goal_dist = torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1)
 
     scale_stack = torch.stack(scale_values)  # (T, n)
+
+    # Infeasibility (only populated when use_exact_qp=True)
+    total_calls = getattr(method, "total_qp_calls", 0)
+    infeasible   = getattr(method, "infeasible_count", 0)
+    infeasibility_rate = infeasible / total_calls if total_calls > 0 else float("nan")
+
     return {
         "success": goal_reached_step is not None,
         "collision_count": collision_count,
@@ -538,6 +554,9 @@ def evaluate_episode(
         "scale_mean": scale_stack.mean().item(),
         "scale_min": scale_stack.min().item(),
         "scale_max": scale_stack.max().item(),
+        "qp_infeasible_count": infeasible,
+        "qp_total_calls": total_calls,
+        "qp_infeasibility_rate": infeasibility_rate,
     }
 
 
@@ -668,6 +687,10 @@ def main():
         print(f"    FinalGoalDist: {agg.get('final_goal_dist_mean', 0):.3f}")
         print(f"    MaxGamma: {agg.get('max_gamma_mean', 0):.3f}")
         print(f"    Scale: [{agg.get('scale_min_mean', 1):.2f}, {agg.get('scale_max_mean', 1):.2f}]")
+        if args.exact_qp and _QUADPROG_AVAILABLE:
+            inf_rate = agg.get("qp_infeasibility_rate_mean", float("nan"))
+            inf_total = agg.get("qp_infeasible_count_mean", 0)
+            print(f"    QP Infeasibility: {inf_rate:.1%}  (avg {inf_total:.1f} infeasible solves/episode)")
 
     # Save
     with open(args.save_json, "w") as f:
