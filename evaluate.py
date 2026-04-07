@@ -639,28 +639,18 @@ def main():
     if args.area_size is not None:
         print(f"  [area_size] Overriding training config ({cfg['area_size']}) → {area_size}")
 
+    env_params = cfg.copy()
+    env_params["n_obs"] = n_obs
+    if args.no_scale:
+        env_params["s_min"] = 1.0
+        env_params["s_max"] = 1.0
+
     env = SwarmIntegrator(
         num_agents=cfg["num_agents"],
         area_size=area_size,
         dt=cfg.get("dt", 0.03),
         max_steps=args.max_steps,
-        params={
-            "n_obs": n_obs,
-            "use_payload": cfg.get("use_payload", True),
-            "comm_radius": cfg["comm_radius"],
-            "R_form": cfg.get("R_form", 0.5),
-            "r_margin": cfg.get("r_margin", 0.2),
-            "s_min": 1.0 if args.no_scale else cfg.get("s_min", 0.4),
-            "s_max": 1.0 if args.no_scale else cfg.get("s_max", 1.5),
-            "mass": cfg.get("mass", 0.1),
-            "u_max": cfg.get("u_max", 0.3),
-            "v_max": cfg.get("v_max", 1.0),
-            "cable_length": cfg.get("cable_length", 1.0),
-            "gravity": cfg.get("gravity", 9.81),
-            "gamma_min": cfg.get("gamma_min", 0.2),
-            "gamma_max_full": cfg.get("gamma_max_full", 0.75),
-            "payload_damping": cfg.get("payload_damping", 0.03),
-        },
+        params=env_params,
     )
 
     results: Dict[str, Any] = {}
