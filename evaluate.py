@@ -471,7 +471,9 @@ class LQROnly(MethodController):
         self.no_scale = no_scale
 
     def select_action(self, env):
-        u = env.nominal_controller()
+        s_max = env.params.get("s_max", 1.5)
+        s_dot_target = 1.0 * (s_max - env.scale_states[:, 0])
+        u = env.nominal_controller(s_dot_target=s_dot_target)
         if self.no_scale:
             u[:, 2] = 0.0
         return u
