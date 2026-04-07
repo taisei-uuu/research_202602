@@ -323,7 +323,7 @@ class AffinePolicy(MethodController):
             # QP — LiDAR hits + agent-agent info
             sc = env.scale_states[:, 0]
             sd = env.scale_states[:, 1]
-            ps = env.payload_states
+            ps = env.payload_states if env.params.get("use_payload", True) else None
             n  = env.num_agents
 
             lidar_hits = env.get_lidar_hits(num_beams=32)[..., :2]  # (n, 32, 2)
@@ -403,7 +403,7 @@ class HOCBFWithLQR(MethodController):
             vel = env.agent_states[:, 2:4]
             sc  = env.scale_states[:, 0]
             sd  = env.scale_states[:, 1]
-            ps  = env.payload_states
+            ps  = env.payload_states if env.params.get("use_payload", True) else None
             n   = env.num_agents
 
             lidar_hits = env.get_lidar_hits(num_beams=32)[..., :2]  # (n, 32, 2)
@@ -529,15 +529,17 @@ def evaluate_episode(
         scale_values.append(s_curr)
 
         # Payload swing: gamma = sqrt(gamma_x^2 + gamma_y^2)
-        gamma = torch.sqrt(env.payload_states[:, 0]**2 + env.payload_states[:, 1]**2)
-        max_gamma = max(max_gamma, gamma.max().item())
-        gamma_values.append(gamma.mean().item())
+        use_payload = env.params.get("use_payload", True)
+        if use_payload:
+            gamma = torch.sqrt(env.payload_states[:, 0]**2 + env.payload_states[:, 1]**2)
+            max_gamma = max(max_gamma, gamma.max().item())
+            gamma_values.append(gamma.mean().item())
 
-        # gamma_viol: timesteps where gamma > gamma_max(s) for any agent
-        ratio = (R_form * s_curr / cable_length).clamp(0.0, 0.9999)
-        gamma_max_s = torch.arcsin(ratio)
-        if (gamma > gamma_max_s).any():
-            gamma_viol_count += 1
+            # gamma_viol: timesteps where gamma > gamma_max(s) for any agent
+            ratio = (R_form * s_curr / cable_length).clamp(0.0, 0.9999)
+            gamma_max_s = torch.arcsin(ratio)
+            if (gamma > gamma_max_s).any():
+                gamma_viol_count += 1
 
         # Goal check: all agents within goal_radius
         goal_dist = torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1)

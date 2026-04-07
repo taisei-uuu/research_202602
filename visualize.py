@@ -767,8 +767,8 @@ def create_video(
         f"({n_agents} {entity_name} · {mode_label})",
         fontsize=14, fontweight="bold", pad=12,
     )
-    ax.set_xlabel("x", fontsize=12)
-    ax.set_ylabel("y", fontsize=12)
+    ax.set_xlabel("x [m]", fontsize=12)
+    ax.set_ylabel("y [m]", fontsize=12)
 
     # Legend
     from matplotlib.lines import Line2D
@@ -1050,8 +1050,8 @@ def plot_trajectories(
         f"({n_agents} {entity_name}, {trajectories.shape[0]-1} steps · {mode_label})",
         fontsize=14, fontweight="bold", pad=12,
     )
-    ax.set_xlabel("x", fontsize=12)
-    ax.set_ylabel("y", fontsize=12)
+    ax.set_xlabel("x [m]", fontsize=12)
+    ax.set_ylabel("y [m]", fontsize=12)
 
     from matplotlib.lines import Line2D
     handles = []
