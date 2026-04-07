@@ -612,7 +612,7 @@ def main():
                         help="Use exact QP solver (quadprog) instead of Dykstra projection")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
-    parser.add_argument("--episodes", type=int, default=20)
+    parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--area_size", type=float, default=None,
                         help="Override arena size (default: use training config)")
