@@ -496,6 +496,7 @@ def evaluate_episode(
     total_control_effort = 0.0
     min_dist = float("inf")
     collision_count = 0
+    ever_collided = False
     gamma_viol_count = 0
     goal_reached_step = None
     max_gamma = 0.0
@@ -523,6 +524,7 @@ def evaluate_episode(
         # Safety Rate: fraction of timesteps with no collision
         if env.unsafe_mask().any():
             collision_count += 1
+            ever_collided = True
 
         # Scale tracking
         s_curr = env.scale_states[:, 0].clone()
@@ -558,7 +560,7 @@ def evaluate_episode(
     infeasibility_rate = infeasible / total_calls if total_calls > 0 else float("nan")
 
     return {
-        "success": goal_reached_step is not None,
+        "success": goal_reached_step is not None and not ever_collided,
         "safety_rate": 1.0 - (collision_count / total_steps),
         "mean_gamma": float(np.mean(gamma_values)) if gamma_values else 0.0,
         "max_gamma": max_gamma,
