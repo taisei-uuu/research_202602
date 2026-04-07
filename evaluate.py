@@ -526,7 +526,7 @@ def evaluate_episode(
             min_dist = min(min_dist, dist.min().item())
 
         # Safety Rate: fraction of timesteps with no collision
-        if env.unsafe_mask().any():
+        if info.get("collision", False):
             collision_count += 1
             ever_collided = True
 

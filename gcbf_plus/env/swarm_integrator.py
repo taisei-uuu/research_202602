@@ -344,7 +344,9 @@ class SwarmIntegrator:
         self.payload_states = torch.stack([new_gx, new_gy, new_gx_dot, new_gy_dot], dim=-1)
 
         self._step_count += 1
-        return self.agent_states, {"done": self._step_count >= self.max_steps}
+        collision = self.unsafe_mask().any().item()
+        done = self._step_count >= self.max_steps or collision
+        return self.agent_states, {"done": done, "collision": collision}
 
     # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
     def nominal_controller(self, v_target=None, s_dot_target=None):
