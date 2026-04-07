@@ -619,7 +619,7 @@ def evaluate_episode(
     return {
         "success": goal_reached_step is not None and not ever_collided,
         "arrival_rate": agent_reached.float().mean().item(),
-        "safety_rate": 1.0 - (collision_count / total_steps),
+        "safety_rate": 0.0 if ever_collided else 1.0,
         "mean_gamma": float(np.mean(gamma_values)) if gamma_values else 0.0,
         "max_gamma": max_gamma,
         "gamma_viol": gamma_viol_count / total_steps,
