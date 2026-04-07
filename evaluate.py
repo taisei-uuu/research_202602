@@ -467,8 +467,14 @@ class LQROnly(MethodController):
     """Pure LQR baseline (no safety filter)."""
     name = "lqr_only"
 
+    def __init__(self, no_scale: bool = False):
+        self.no_scale = no_scale
+
     def select_action(self, env):
-        return env.nominal_controller()
+        u = env.nominal_controller()
+        if self.no_scale:
+            u[:, 2] = 0.0
+        return u
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -635,15 +641,15 @@ def main():
         num_agents=cfg["num_agents"],
         area_size=area_size,
         dt=cfg.get("dt", 0.03),
+        max_steps=args.max_steps,
         params={
             "n_obs": n_obs,
             "use_payload": cfg.get("use_payload", True),
-            **({"s_min": 1.0, "s_max": 1.0} if args.no_scale else {}),
             "comm_radius": cfg["comm_radius"],
             "R_form": cfg.get("R_form", 0.5),
             "r_margin": cfg.get("r_margin", 0.2),
-            "s_min": cfg.get("s_min", 0.4),
-            "s_max": cfg.get("s_max", 1.5),
+            "s_min": 1.0 if args.no_scale else cfg.get("s_min", 0.4),
+            "s_max": 1.0 if args.no_scale else cfg.get("s_max", 1.5),
             "mass": cfg.get("mass", 0.1),
             "u_max": cfg.get("u_max", 0.3),
             "v_max": cfg.get("v_max", 1.0),
@@ -668,7 +674,7 @@ def main():
         elif mname == "hocbf_lqr":
             method = cls(cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp)
         else:
-            method = cls()
+            method = cls(no_scale=args.no_scale)
 
         print(f"\n  Evaluating: {mname} ({args.episodes} episodes)")
         metrics_list = []
