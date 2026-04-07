@@ -1,6 +1,7 @@
 {
   "_comment": "1 swarm crossing diagonally (bottom-left only), obstacles flanking the path.",
   "_arena": "7.5x7.5m",
+  "scale_init": 1.5,
   "agents": [
     [1.0, 1.0]
   ],

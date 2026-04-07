@@ -605,7 +605,7 @@ def evaluate_episode(
         if goal_dist.max() < goal_radius and goal_reached_step is None:
             goal_reached_step = t
 
-        if info["done"]:
+        if info["done"] or info.get("collision", False):
             break
 
     total_steps = t + 1

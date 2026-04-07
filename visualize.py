@@ -104,7 +104,8 @@ def _apply_scenario(env: SwarmIntegrator, scenario_path: str) -> Optional[float]
         # Sync num_agents and resize dependent states to match new agent count
         new_n = pos.shape[0]
         env.num_agents = new_n
-        env.scale_states = torch.tensor([[1.0, 0.0]] * new_n, dtype=torch.float32)
+        s_init = float(sc.get("scale_init", 1.0))
+        env.scale_states = torch.tensor([[s_init, 0.0]] * new_n, dtype=torch.float32)
         env.payload_states = torch.zeros(new_n, 4, dtype=torch.float32)
 
     if "goals" in sc:

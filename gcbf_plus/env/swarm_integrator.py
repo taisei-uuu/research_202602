@@ -345,7 +345,7 @@ class SwarmIntegrator:
 
         self._step_count += 1
         collision = self.unsafe_mask().any().item()
-        done = self._step_count >= self.max_steps or collision
+        done = self._step_count >= self.max_steps
         return self.agent_states, {"done": done, "collision": collision}
 
     # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
