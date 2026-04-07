@@ -144,6 +144,7 @@ def train(
     device: str = "auto",
     use_payload: bool = True,
     no_scale: bool = False,
+    s_max_one: bool = False,
     a_max_gnn_arg: float = 2.0,
 ) -> Dict[str, list]:
     """Train hierarchical velocity-command swarm policy."""
@@ -160,6 +161,8 @@ def train(
     env_override = {"n_obs": n_obs, "use_payload": use_payload}
     if no_scale:
         env_override["s_min"] = 1.0
+        env_override["s_max"] = 1.0
+    elif s_max_one:
         env_override["s_max"] = 1.0
     vec_env = VectorizedSwarmEnv(
         num_agents=num_agents,
@@ -631,6 +634,7 @@ def train(
             "architecture": "hierarchical_velocity_command",
             "use_payload": use_payload,
             "no_scale": no_scale,
+            "s_max_one": s_max_one,
         },
         "history": history,
     }
@@ -666,6 +670,8 @@ def main():
                         help="Disable payload dynamics and HOCBF constraint")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix formation scale at s=1.0 (ablation: no scale deformation)")
+    parser.add_argument("--s_max_one", action="store_true", default=False,
+                        help="Cap scale at s_max=1.0 (no expansion, but shrink allowed)")
     parser.add_argument("--a_max_gnn", type=float, default=2.0,
                         help="GNN translation acceleration output scale in m/s² (default 2.0)")
     args = parser.parse_args()

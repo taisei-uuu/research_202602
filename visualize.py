@@ -374,6 +374,7 @@ def run_simulation(
     scenario_path: Optional[str] = None,
     use_exact_qp: bool = False,
     no_scale: bool = False,
+    s_max_one: bool = False,
     method: str = "affine_policy",
 ):
     policy_net = None
@@ -422,6 +423,8 @@ def run_simulation(
 
     if no_scale:
         print("  [no_scale] Formation scale fixed at s=1.0")
+    if s_max_one:
+        print("  [s_max_one] Scale capped at s_max=1.0 (shrink allowed)")
 
     if is_swarm:
         # Use full cfg to ensure mass, gravity, obs_len_range, etc. exactly match training
@@ -429,6 +432,8 @@ def run_simulation(
         env_params.update({"n_obs": n_obs, "comm_radius": comm_radius})
         if no_scale:
             env_params["s_min"] = 1.0
+            env_params["s_max"] = 1.0
+        elif s_max_one:
             env_params["s_max"] = 1.0
         env = SwarmIntegrator(
             num_agents=num_agents, area_size=area_size, dt=dt, max_steps=max_steps,
@@ -1106,6 +1111,8 @@ def main():
                         help="Use exact QP solver (quadprog) instead of Dykstra projection")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
+    parser.add_argument("--s_max_one", action="store_true", default=False,
+                        help="Cap scale at s_max=1.0 (no expansion, but shrink allowed)")
     parser.add_argument("--method", type=str, default="affine_policy",
                         choices=["affine_policy", "hocbf_lqr", "lqr_only"],
                         help="Control method to visualize (default: affine_policy)")
@@ -1132,6 +1139,7 @@ def main():
         scenario_path=args.scenario,
         use_exact_qp=args.exact_qp,
         no_scale=args.no_scale,
+        s_max_one=args.s_max_one,
         method=args.method,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,

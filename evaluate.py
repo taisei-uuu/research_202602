@@ -616,6 +616,8 @@ def main():
                         help="Use exact QP solver (quadprog) instead of Dykstra projection")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
+    parser.add_argument("--s_max_one", action="store_true", default=False,
+                        help="Cap scale at s_max=1.0 (no expansion, but shrink allowed)")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--area_size", type=float, default=None,
@@ -638,6 +640,8 @@ def main():
         print(f"  [n_obs] Overriding training config ({cfg['n_obs']}) → {n_obs}")
     if args.no_scale:
         print("  [no_scale] Formation scale fixed at s=1.0")
+    if args.s_max_one:
+        print("  [s_max_one] Scale capped at s_max=1.0 (shrink allowed)")
 
     area_size = args.area_size if args.area_size is not None else cfg["area_size"]
     if args.area_size is not None:
@@ -647,6 +651,8 @@ def main():
     env_params["n_obs"] = n_obs
     if args.no_scale:
         env_params["s_min"] = 1.0
+        env_params["s_max"] = 1.0
+    elif args.s_max_one:
         env_params["s_max"] = 1.0
 
     env = SwarmIntegrator(
