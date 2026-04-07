@@ -1,20 +1,17 @@
 {
-  "_comment": "2 swarms crossing diagonally, obstacles flanking the path on both sides.",
-  "_arena": "7.5x7.5m",
+  "_comment": "2 swarms crossing diagonally through a narrow bottleneck. s_max=1.0 setting: swarms must shrink (s<~0.75) to squeeze through, then restore.",
+  "_arena": "5x5m",
+  "_bottleneck": "obstacle gap = 1.1m; requires s < 0.75 (r < 0.575m) to pass individually",
   "agents": [
-    [1.0, 1.0],
-    [6.5, 6.5]
+    [0.8, 0.8],
+    [4.2, 4.2]
   ],
   "goals": [
-    [6.5, 6.5],
-    [1.0, 1.0]
+    [4.2, 4.2],
+    [0.8, 0.8]
   ],
   "obstacles": [
-    {"center": [1.74, 3.01], "radius": 0.2},
-    {"center": [3.01, 1.74], "radius": 0.2},
-    {"center": [2.91, 4.60], "radius": 0.2},
-    {"center": [4.60, 2.91], "radius": 0.2},
-    {"center": [4.49, 5.76], "radius": 0.2},
-    {"center": [5.76, 4.49], "radius": 0.2}
+    {"center": [1.9, 3.1], "radius": 0.4},
+    {"center": [3.1, 1.9], "radius": 0.4}
   ]
 }
