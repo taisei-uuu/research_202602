@@ -260,7 +260,7 @@ class MethodController(ABC):
         self.total_qp_calls: int = 0
 
     @abstractmethod
-    def select_action(self, env: SwarmIntegrator) -> torch.Tensor:
+    def select_action(self, env: SwarmIntegrator, n_rays: int = 32) -> torch.Tensor:
         ...
 
 
@@ -279,7 +279,7 @@ class AffinePolicy(MethodController):
         self.no_scale = no_scale
         self.use_exact_qp = use_exact_qp
 
-    def select_action(self, env):
+    def select_action(self, env, n_rays: int = 32):
         with torch.no_grad():
             graph = env._get_graph()
             cfg = self.cfg
@@ -326,7 +326,7 @@ class AffinePolicy(MethodController):
             ps = env.payload_states if env.params.get("use_payload", True) else None
             n  = env.num_agents
 
-            lidar_hits = env.get_lidar_hits(num_beams=32)[..., :2]  # (n, 32, 2)
+            lidar_hits = env.get_lidar_hits(num_beams=n_rays)[..., :2]
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -392,7 +392,7 @@ class HOCBFWithLQR(MethodController):
         self.no_scale = no_scale
         self.use_exact_qp = use_exact_qp
 
-    def select_action(self, env):
+    def select_action(self, env, n_rays: int = 32):
         s_max = env.params.get("s_max", 1.5)
         s_dot_target = 1.0 * (s_max - env.scale_states[:, 0])
         u_ref = env.nominal_controller(s_dot_target=s_dot_target)
@@ -406,7 +406,7 @@ class HOCBFWithLQR(MethodController):
             ps  = env.payload_states if env.params.get("use_payload", True) else None
             n   = env.num_agents
 
-            lidar_hits = env.get_lidar_hits(num_beams=32)[..., :2]  # (n, 32, 2)
+            lidar_hits = env.get_lidar_hits(num_beams=n_rays)[..., :2]
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -470,7 +470,7 @@ class LQROnly(MethodController):
     def __init__(self, no_scale: bool = False):
         self.no_scale = no_scale
 
-    def select_action(self, env):
+    def select_action(self, env, n_rays: int = 32):
         s_max = env.params.get("s_max", 1.5)
         s_dot_target = 1.0 * (s_max - env.scale_states[:, 0])
         u = env.nominal_controller(s_dot_target=s_dot_target)
@@ -489,6 +489,7 @@ def evaluate_episode(
     seed: int,
     max_steps: int = 512,
     goal_radius: float = 0.3,
+    n_rays: int = 32,
 ):
     """Run one episode, return metrics dict."""
     env.reset(seed=seed)
@@ -501,6 +502,7 @@ def evaluate_episode(
     ever_collided = False
     gamma_viol_count = 0
     goal_reached_step = None
+    agent_reached = torch.zeros(n, dtype=torch.bool)  # per-agent arrival tracking
     max_gamma = 0.0
     gamma_values = []
     scale_values = []
@@ -509,7 +511,7 @@ def evaluate_episode(
     cable_length = env.params.get("cable_length", 1.0)
 
     for t in range(max_steps):
-        action = method.select_action(env)
+        action = method.select_action(env, n_rays=n_rays)
         _, info = env.step(action)
 
         # Control effort: ||a_c||  (translation only, per agent, summed over agents and time)
@@ -545,8 +547,9 @@ def evaluate_episode(
             if (gamma > gamma_max_s).any():
                 gamma_viol_count += 1
 
-        # Goal check: all agents within goal_radius
+        # Goal check
         goal_dist = torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1)
+        agent_reached |= goal_dist < goal_radius
         if goal_dist.max() < goal_radius and goal_reached_step is None:
             goal_reached_step = t
 
@@ -563,6 +566,7 @@ def evaluate_episode(
 
     return {
         "success": goal_reached_step is not None and not ever_collided,
+        "arrival_rate": agent_reached.float().mean().item(),
         "safety_rate": 1.0 - (collision_count / total_steps),
         "mean_gamma": float(np.mean(gamma_values)) if gamma_values else 0.0,
         "max_gamma": max_gamma,
@@ -570,7 +574,7 @@ def evaluate_episode(
         "scale_min": scale_stack.min().item(),
         "scale_max": scale_stack.max().item(),
         "control_effort": total_control_effort,
-        "goal_time": goal_reached_step,
+        "goal_time": goal_reached_step if goal_reached_step is not None else max_steps,
         # extras
         "min_distance": min_dist if min_dist < 1e5 else float("nan"),
         "final_goal_dist": torch.norm(env.agent_states[:, :2] - env.goal_states[:, :2], dim=-1).mean().item(),
@@ -618,6 +622,8 @@ def main():
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
     parser.add_argument("--s_max_one", action="store_true", default=False,
                         help="Cap scale at s_max=1.0 (no expansion, but shrink allowed)")
+    parser.add_argument("--n_rays", type=int, default=32,
+                        help="Number of LiDAR rays for obstacle sensing (default: 32)")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--area_size", type=float, default=None,
@@ -682,7 +688,7 @@ def main():
         metrics_list = []
         for ep in range(args.episodes):
             seed = args.seed_start + ep
-            m = evaluate_episode(method, env, seed=seed, max_steps=args.max_steps)
+            m = evaluate_episode(method, env, seed=seed, max_steps=args.max_steps, n_rays=args.n_rays)
             metrics_list.append(m)
 
         # Aggregate
@@ -701,6 +707,7 @@ def main():
 
         results[mname] = agg
         sr   = agg.get("success", 0) * 100
+        ar   = agg.get("arrival_rate_mean", 0) * 100
         safe = agg.get("safety_rate_mean", 0) * 100
         gm   = agg.get("mean_gamma_mean", 0)
         gmx  = agg.get("max_gamma_mean", 0)
@@ -710,6 +717,7 @@ def main():
         ce   = agg.get("control_effort_mean", 0)
         gt   = agg.get("goal_time_mean", float("nan"))
         print(f"    Success Rate    : {sr:.1f} %")
+        print(f"    Arrival Rate    : {ar:.1f} %")
         print(f"    Safety Rate     : {safe:.1f} %")
         print(f"    gamma_mean      : {gm:.4f} rad")
         print(f"    gamma_max       : {gmx:.4f} rad")
