@@ -532,6 +532,23 @@ def run_simulation(
                     u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
                     u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
 
+                # GNN only: skip QP
+                if method == "gnn_only":
+                    u = u_nom
+                    next_obs, info = env.step(u)
+                    trajectories.append(env.agent_states.detach().numpy().copy())
+                    if _use_payload and hasattr(env, 'payload_states') and env.payload_states is not None:
+                        payload_trajectories.append(env.payload_states.detach().numpy().copy())
+                    if hasattr(env, 'scale_states') and env.scale_states is not None:
+                        scale_trajectories.append(env.scale_states.detach().numpy().copy())
+                    curr_graph = env._get_graph()
+                    edges = torch.stack([curr_graph.senders, curr_graph.receivers], dim=0)
+                    edge_trajectories.append(edges.detach().numpy().copy())
+                    lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
+                    if info["done"]:
+                        break
+                    continue
+
                 ps = env.payload_states if _use_payload else None
 
                 # Obstacle hits from LiDAR — always returns (num_agents, 32, 4)
@@ -1114,7 +1131,7 @@ def main():
     parser.add_argument("--s_max_one", action="store_true", default=False,
                         help="Cap scale at s_max=1.0 (no expansion, but shrink allowed)")
     parser.add_argument("--method", type=str, default="affine_policy",
-                        choices=["affine_policy", "hocbf_lqr", "lqr_only"],
+                        choices=["affine_policy", "gnn_only", "hocbf_lqr", "lqr_only"],
                         help="Control method to visualize (default: affine_policy)")
 
     args = parser.parse_args()
