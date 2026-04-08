@@ -364,7 +364,8 @@ class SwarmIntegrator:
             pos = self.agent_states[:, :2]
             goal_pos = self.goal_states[:, :2]
             v_ref = K_pos * (goal_pos - pos)
-            v_ref = torch.clamp(v_ref, -v_max, v_max)
+            speed = v_ref.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            v_ref = v_ref * (speed.clamp(max=v_max) / speed)
             v_target = v_ref
 
         if s_dot_target is None:

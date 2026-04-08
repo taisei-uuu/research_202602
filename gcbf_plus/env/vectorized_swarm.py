@@ -392,8 +392,9 @@ class VectorizedSwarmEnv:
             pos = self._agent_states[:, :, :2]      # (B, n, 2)
             goal_pos = self._goal_states[:, :, :2]   # (B, n, 2)
             v_ref = K_pos * (goal_pos - pos)          # (B, n, 2)
-            # Clamp to physical velocity limits
-            v_ref = torch.clamp(v_ref, -v_max, v_max)
+            # Clamp by vector norm to preserve direction
+            speed = v_ref.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            v_ref = v_ref * (speed.clamp(max=v_max) / speed)
             v_target = v_ref
 
         if s_dot_target is None:

@@ -505,7 +505,8 @@ def run_simulation(
 
                 # PD nominal: translation toward goal, scale toward s_max
                 v_ref = K_pos_cfg * (goal_pos - pos)
-                v_ref = torch.clamp(v_ref, -v_max_cfg, v_max_cfg)
+                speed = v_ref.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                v_ref = v_ref * (speed.clamp(max=v_max_cfg) / speed)
                 s_dot_ref = 1.0 * (s_max - sc)
                 a_trans = K_v_cfg * (v_ref - v_current)
                 a_s = K_s_cfg * (s_dot_ref - sd)
