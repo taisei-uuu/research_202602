@@ -189,7 +189,6 @@ def train(
         pool_payload = []
         pool_goal = []
         pool_obs = []
-        pool_obs_hits = []  # LiDAR hit points pool
         reset_count = 0
         goal_count = 0
         collision_count = 0
@@ -202,10 +201,6 @@ def train(
                 pool_payload.append(vec_env._payload_states.clone())
                 pool_goal.append(vec_env._goal_states.clone())
                 pool_obs.append(vec_env._obstacle_states.clone())
-                # Collect LiDAR hits (B, n, nb, 2) - position only
-                nb = 32
-                lidar_hits_t = vec_env.get_lidar_hits(num_beams=nb)[..., :2]  # (B, n, nb, 2)
-                pool_obs_hits.append(lidar_hits_t.clone())
 
                 # GNN → tanh → scale to physical acceleration offset
                 mega = vec_env.build_batch_graph()
@@ -235,9 +230,14 @@ def train(
                 s_dot_flat = vec_env._scale_states[:, :, 1].reshape(BN)
                 ps_flat = vec_env._payload_states.reshape(BN, 4)
 
-                # Use LiDAR hits for QP instead of centers (already collected)
-                obs_hits_flat = lidar_hits_t.reshape(BN, nb, 2)
-                
+                # Obstacle centers per agent: (B, n_obs, 2) → (BN, n_obs, 2)
+                n_obs_qp = vec_env._obstacle_states.shape[1]
+                obs_hits_flat = (
+                    vec_env._obstacle_states[:, :, :2]
+                    .unsqueeze(1).expand(batch_size, num_agents, n_obs_qp, 2)
+                    .reshape(BN, n_obs_qp, 2)
+                ) if n_obs_qp > 0 else None
+
                 # Agent-Agent info
                 if num_agents > 1:
                     dev = vec_env._agent_states.device
@@ -321,8 +321,6 @@ def train(
         all_goal = torch.stack(pool_goal).reshape(N_pool, num_agents, 4)
         all_obs_st = torch.stack(pool_obs).reshape(N_pool, -1, 4)
 
-        all_obs_hits = torch.stack(pool_obs_hits).reshape(N_pool, num_agents, -1, 2)  # (N_pool, n, nb, 2)
-
         perm = torch.randperm(N_pool, device=dev)
 
         # ============================================================
@@ -345,7 +343,6 @@ def train(
                 mb_payload = all_payload[idx]
                 mb_goal = all_goal[idx]
                 mb_obs_st = all_obs_st[idx]
-                mb_obs_hits = all_obs_hits[idx]  # (mb, n, nb, 2)
 
                 # ── Build graph (dynamic comm_radius) ──
                 _R_form = vec_env.params.get("R_form", 0.5)
@@ -382,12 +379,13 @@ def train(
                     sd_f = mb_scale.reshape(-1, 2)[:, 1]
                     ps_f = mb_payload.reshape(-1, 4)
 
-                    # LiDAR hits for this mini-batch
-                    # mb_obs_hits shape: (mb_size, n, nb, 2) — already per-agent
-                    if mb_obs_hits is not None:
-                        obs_hits_mb = mb_obs_hits.reshape(mb_size * num_agents, -1, 2)
-                    else:
-                        obs_hits_mb = None
+                    # Obstacle centers per agent: (mb, n_obs, 2) → (mb*n, n_obs, 2)
+                    _n_obs = mb_obs_st.shape[1]
+                    obs_hits_mb = (
+                        mb_obs_st[:, :, :2]
+                        .unsqueeze(1).expand(mb_size, num_agents, _n_obs, 2)
+                        .reshape(mb_size * num_agents, _n_obs, 2)
+                    ) if _n_obs > 0 else None
 
                     # Agent-Agent info
                     if num_agents > 1:

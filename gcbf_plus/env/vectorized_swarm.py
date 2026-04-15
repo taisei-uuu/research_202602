@@ -543,24 +543,16 @@ class VectorizedSwarmEnv:
             agent_states = self._agent_states
         if scale_states is None:
             scale_states = self._scale_states
-            
-        # 1. Update LiDAR hits for this step
-        hits = self.get_lidar_hits(num_beams=16) # (B, n, n_beams, 4)
-        
-        # 2. Build graph using hit points instead of centers
-        # Flatten hits for graph builder: (B, n * n_beams, 4)
-        B, n, nb, _ = hits.shape
-        flat_hits = hits.view(B, n * nb, 4)
-        
+
         s = scale_states[:, :, 0]
         R_form = self.params.get("R_form", 0.5)
         dyn_cr = R_form * s + (self.comm_radius - R_form)
-        
+
         use_payload = self.params.get("use_payload", True)
         return build_vectorized_swarm_graph(
             agent_states=agent_states,
             goal_states=self._goal_states,
-            obstacle_states=flat_hits,
+            obstacle_states=self._obstacle_states,
             comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,

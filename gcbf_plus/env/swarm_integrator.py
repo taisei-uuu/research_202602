@@ -474,19 +474,17 @@ class SwarmIntegrator:
 
     # ── Graph builder ─────────────────────────────────────────────────
     def _get_graph(self) -> GraphsTuple:
-        # 1. Update LiDAR sensing
-        lidar_hits = self.get_lidar_points()
-        
-        # 2. Build graph with per-agent hit points
         s = self.scale_states[:, 0]
         R_form = self.params.get("R_form", 0.5)
         dyn_cr = R_form * s + (self.comm_radius - R_form)
-        
+
+        obs = self._obstacle_states  # (n_obs, 4) or None
+
         use_payload = self.params.get("use_payload", True)
         return build_swarm_graph_from_states(
             agent_states=self.agent_states,
             goal_states=self.goal_states,
-            obstacle_positions=lidar_hits,
+            obstacle_positions=obs,
             comm_radius=dyn_cr,
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
