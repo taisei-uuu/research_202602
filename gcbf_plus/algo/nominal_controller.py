@@ -59,7 +59,6 @@ class NominalController:
         u_max_scale: float,
         K_s_pos: float = 1.0,
         K_s: float = 2.0,
-        s_max: float = 1.5,
         Q: Optional[np.ndarray] = None,
         R: Optional[np.ndarray] = None,
     ):
@@ -68,7 +67,6 @@ class NominalController:
         self.u_max_scale = u_max_scale
         self.K_s_pos = K_s_pos
         self.K_s = K_s
-        self.s_max = s_max
 
         # Discrete-time double-integrator for 4D translational state
         A = np.eye(4, dtype=np.float32)
@@ -120,9 +118,11 @@ class NominalController:
         u_trans = u_trans.clamp(-self.u_max, self.u_max)
 
         # ── Scale ────────────────────────────────────────────────────────
+        # Nominal targets s=1.0 (neutral formation).
+        # GNN offset (added by caller) shrinks the formation for obstacle avoidance.
         s         = scale_states[..., 0]
         s_dot     = scale_states[..., 1]
-        s_dot_ref = self.K_s_pos * (self.s_max - s)
+        s_dot_ref = self.K_s_pos * (1.0 - s)
         a_s       = self.K_s * (s_dot_ref - s_dot)
         a_s       = a_s.clamp(-self.u_max_scale, self.u_max_scale)
 

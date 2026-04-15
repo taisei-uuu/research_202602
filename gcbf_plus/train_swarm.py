@@ -75,7 +75,7 @@ def train(
     seed: int = 0,
     checkpoint_path: str = "affine_swarm_checkpoint.pt",
     device: str = "auto",
-    use_payload: bool = True,
+    use_payload: bool = False,
     no_scale: bool = False,
     s_max_one: bool = False,
     a_max_gnn_arg: float = 2.0,
@@ -136,7 +136,6 @@ def train(
         u_max_scale=u_max * 0.3,
         K_s_pos=vec_env.params.get("K_s_pos", 1.0),
         K_s=vec_env.params.get("K_s", 2.0),
-        s_max=s_max,
     )
 
     # GNN acceleration output scale

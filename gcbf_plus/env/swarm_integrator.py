@@ -121,7 +121,6 @@ class SwarmIntegrator:
             u_max_scale=self.params.get("u_max_scale", self.params["u_max"] * 0.3),
             K_s_pos=self.params.get("K_s_pos", 1.0),
             K_s=self.params.get("K_s", 2.0),
-            s_max=self.params.get("s_max", 1.5),
         )
 
         self._obstacles: List[Obstacle] = []
@@ -144,7 +143,7 @@ class SwarmIntegrator:
     @property
     def node_dim(self) -> int:
         # 3D one-hot + 4D payload state when payload is enabled
-        return 7 if self.params.get("use_payload", True) else 3
+        return 7 if self.params.get("use_payload", False) else 3
 
     @property
     def edge_dim(self) -> int:
@@ -480,7 +479,7 @@ class SwarmIntegrator:
 
         obs = self._obstacle_states  # (n_obs, 4) or None
 
-        use_payload = self.params.get("use_payload", True)
+        use_payload = self.params.get("use_payload", False)
         return build_swarm_graph_from_states(
             agent_states=self.agent_states,
             goal_states=self.goal_states,
