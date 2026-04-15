@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from ..utils.graph import GraphsTuple
+from ..algo.nominal_controller import NominalController
 from ..utils.swarm_graph import build_swarm_graph_from_states
 
 
@@ -59,19 +60,6 @@ class Obstacle:
                 return start + t * d
         return None
 
-
-# ── LQR helper ───────────────────────────────────────────────────────
-
-def _dlqr(A, B, Q, R):
-    """Solve discrete-time LQR via iterative DARE.  Returns gain K."""
-    P = Q.copy()
-    for _ in range(1000):
-        K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
-        P_new = Q + A.T @ P @ A - A.T @ P @ B @ K
-        if np.max(np.abs(P_new - P)) < 1e-10:
-            break
-        P = P_new
-    return K
 
 
 class SwarmIntegrator:
@@ -124,16 +112,17 @@ class SwarmIntegrator:
         if params is not None:
             self.params.update(params)
 
-        # LQR gain for 4D translational system (used for CoM control only)
-        m = self.params["mass"]
-        A_ct = np.zeros((4, 4), dtype=np.float32)
-        A_ct[0, 2] = 1.0
-        A_ct[1, 3] = 1.0
-        A_t = A_ct * dt + np.eye(4, dtype=np.float32)
-        B_t = np.array([[0, 0], [0, 0], [1/m, 0], [0, 1/m]], dtype=np.float32) * dt
-        Q_t = np.eye(4, dtype=np.float32) * 5.0
-        R_t = np.eye(2, dtype=np.float32)
-        self._K = torch.tensor(_dlqr(A_t, B_t, Q_t, R_t), dtype=torch.float32)
+        # Nominal controller (LQR-based, shared across eval and training)
+        self._nominal_ctrl = NominalController(
+            dt=dt,
+            mass=self.params["mass"],
+            comm_radius=self.params["comm_radius"],
+            u_max=self.params["u_max"],
+            u_max_scale=self.params.get("u_max_scale", self.params["u_max"] * 0.3),
+            K_s_pos=self.params.get("K_s_pos", 1.0),
+            K_s=self.params.get("K_s", 2.0),
+            s_max=self.params.get("s_max", 1.5),
+        )
 
         self._obstacles: List[Obstacle] = []
         self._obstacle_states: Optional[torch.Tensor] = None
@@ -264,7 +253,6 @@ class SwarmIntegrator:
         self.scale_states = self.scale_states.to(device)
         if self._obstacle_states is not None:
             self._obstacle_states = self._obstacle_states.to(device)
-        self._K = self._K.to(device)
         return self
 
     # ── Step ──────────────────────────────────────────────────────────
@@ -348,37 +336,14 @@ class SwarmIntegrator:
         done = self._step_count >= self.max_steps
         return self.agent_states, {"done": done, "collision": collision}
 
-    # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
-    def nominal_controller(self, v_target=None, s_dot_target=None):
-        """Returns (n, 3): [a_cx_nom, a_cy_nom, a_s_nom].
-
-        Level 1: v_ref = K_pos * (goal_pos - pos)
-        Level 2: a_nom = K_v * (v_target - v_current)
-        """
-        K_pos = self.params.get("K_pos", 0.5)
-        K_v = self.params.get("K_v", 2.0)
-        K_s = self.params.get("K_s", 2.0)
-        v_max = self.params.get("v_max", 1.0)
-
-        if v_target is None:
-            pos = self.agent_states[:, :2]
-            goal_pos = self.goal_states[:, :2]
-            v_ref = K_pos * (goal_pos - pos)
-            speed = v_ref.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-            v_ref = v_ref * (speed.clamp(max=v_max) / speed)
-            v_target = v_ref
-
-        if s_dot_target is None:
-            s_dot_target = torch.zeros_like(self.scale_states[:, 0])
-
-        v_current = self.agent_states[:, 2:4]
-        s_dot_current = self.scale_states[:, 1]
-
-        a_trans_nom = K_v * (v_target - v_current)
-        a_s_nom = K_s * (s_dot_target - s_dot_current)
-
-        u = torch.cat([a_trans_nom, a_s_nom.unsqueeze(-1)], dim=-1)
-        return u
+    # ── Nominal controller ────────────────────────────────────────────────
+    def nominal_controller(self) -> torch.Tensor:
+        """Returns (n, 3): [a_cx_nom, a_cy_nom, a_s_nom] via LQR nominal controller."""
+        return self._nominal_ctrl(
+            self.agent_states,
+            self.goal_states,
+            self.scale_states,
+        )
 
     # ── Unsafe mask (dynamic bounding circle) ─────────────────────────
     def unsafe_mask(self) -> torch.Tensor:

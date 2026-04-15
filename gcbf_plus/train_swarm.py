@@ -35,6 +35,7 @@ from gcbf_plus.env.vectorized_swarm import VectorizedSwarmEnv
 from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.algo.loss import compute_affine_loss
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
+from gcbf_plus.algo.nominal_controller import NominalController
 from gcbf_plus.utils.swarm_graph import build_vectorized_swarm_graph
 
 
@@ -51,74 +52,6 @@ def extract_agent_outputs(
     return full_output[idx.reshape(-1)]
 
 
-def _nominal_accel(
-    pi_scaled: torch.Tensor,
-    agent_states: torch.Tensor,
-    goal_states: torch.Tensor,
-    scale_states: torch.Tensor,
-    K_pos: float,
-    K_v: float,
-    K_s: float,
-    v_max: float,
-    s_max: float = 1.5,
-    K_s_pos: float = 1.0,
-    u_max: float = None,
-    use_payload: bool = True,
-) -> torch.Tensor:
-    """Level 1+2: GNN velocity commands → PD → nominal acceleration (pre-clamped).
-
-    Parameters
-    ----------
-    pi_scaled : (..., 3) — (Δa_cx, Δa_cy, Δa_s) acceleration offsets in physical units.
-    agent_states : (..., 4) — [px, py, vx, vy]
-    goal_states : (..., 4) — [gx, gy, gvx, gvy]
-    scale_states : (..., 2) — [s, s_dot]
-    s_max : float — maximum scale value (expansion target).
-    K_s_pos : float — proportional gain for scale expansion PD.
-    u_max : float or None — max acceleration [m/s²]. If given, pre-clamp output.
-
-    Returns
-    -------
-    u_nom : (..., 3) — [a_cx_nom, a_cy_nom, a_s_nom]
-    """
-    # Level 1: target velocity
-    pos = agent_states[..., :2]
-    goal_pos = goal_states[..., :2]
-    v_current = agent_states[..., 2:4]
-
-    dist = torch.norm(goal_pos - pos, dim=-1, keepdim=True)
-    unit_vec = (goal_pos - pos) / (dist + 1e-6)
-    
-    # v_ref = unit_vec * min(v_max, K_pos * dist)
-    v_ref = unit_vec * torch.clamp(K_pos * dist, max=v_max)
-    v_ref = torch.clamp(v_ref, -v_max, v_max)  # Safety secondary clamp
-
-    v_target = v_ref
-
-    # Scale: PD toward s_max (expansion potential)
-    s_current = scale_states[..., 0]
-    s_dot_current = scale_states[..., 1]
-    s_dot_ref = K_s_pos * (s_max - s_current)  # "want to expand toward s_max"
-    s_dot_target = s_dot_ref
-
-    # Level 2: PD controller + GNN acceleration offset
-    a_trans = K_v * (v_target - v_current) + pi_scaled[..., :2]
-    a_s = K_s * (s_dot_target - s_dot_current) + pi_scaled[..., 2]
-
-    u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
-
-    # Pre-clamp: keep u_nom within physically feasible range (out-of-place for autograd)
-    if u_max is not None:
-        a_max_trans = u_max * 0.7   # 70% for translation
-        a_max_scale = u_max * 0.3   # 30% for scale
-
-        actual_a_max_t = a_max_trans
-
-        clamped_trans = u_nom[..., :2].clamp(-actual_a_max_t, actual_a_max_t)
-        clamped_scale = u_nom[..., 2:].clamp(-a_max_scale, a_max_scale)
-        u_nom = torch.cat([clamped_trans, clamped_scale], dim=-1)
-
-    return u_nom
 
 
 def train(
@@ -194,10 +127,17 @@ def train(
     s_max = vec_env.params["s_max"]
     N_per = num_agents * 2 + n_obs
 
-    # Hierarchical velocity-command gains
-    K_pos = vec_env.params.get("K_pos", 0.5)
-    K_v = vec_env.params.get("K_v", 2.0)
-    K_s = vec_env.params.get("K_s", 2.0)
+    # Nominal controller (shared instance)
+    nominal_ctrl = NominalController(
+        dt=vec_env.dt,
+        mass=vec_env.params["mass"],
+        comm_radius=vec_env.params["comm_radius"],
+        u_max=u_max,
+        u_max_scale=u_max * 0.3,
+        K_s_pos=vec_env.params.get("K_s_pos", 1.0),
+        K_s=vec_env.params.get("K_s", 2.0),
+        s_max=s_max,
+    )
 
     # GNN acceleration output scale
     a_max_gnn = a_max_gnn_arg      # m/s²  — translation acceleration offset
@@ -281,12 +221,10 @@ def train(
                 if no_scale:
                     pi_scaled[:, :, 2] = 0.0
 
-                # Level 1+2: velocity → PD → acceleration (pre-clamped)
-                u_nom = _nominal_accel(
-                    pi_scaled, vec_env._agent_states, vec_env._goal_states,
-                    vec_env._scale_states, K_pos, K_v, K_s, v_max,
-                    s_max=s_max, u_max=u_max, use_payload=use_payload,
-                )
+                # Nominal + GNN offset
+                u_nom = nominal_ctrl(
+                    vec_env._agent_states, vec_env._goal_states, vec_env._scale_states,
+                ) + pi_scaled
 
                 # Level 3: QP solve
                 BN = batch_size * num_agents
@@ -432,12 +370,8 @@ def train(
                 pi_scaled[:, :, :2] = pi_scaled[:, :, :2] * a_max_gnn
                 pi_scaled[:, :, 2] = pi_scaled[:, :, 2] * a_max_gnn_s
 
-                # ── Level 1+2: velocity → PD → acceleration (pre-clamped) ──
-                u_nom = _nominal_accel(
-                    pi_scaled, mb_agent, mb_goal,
-                    mb_scale, K_pos, K_v, K_s, v_max,
-                    s_max=s_max, u_max=u_max, use_payload=use_payload,
-                )
+                # ── Nominal + GNN offset ──
+                u_nom = nominal_ctrl(mb_agent, mb_goal, mb_scale) + pi_scaled
                 u_nom_flat = u_nom.reshape(mb_size * num_agents, 3)
 
                 # ── Level 3: QP solve (no grad) ──
