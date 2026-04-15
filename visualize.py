@@ -38,7 +38,7 @@ try:
 except ImportError:
     _QUADPROG_AVAILABLE = False
 
-from gcbf_plus.env import DoubleIntegrator, SwarmIntegrator
+from gcbf_plus.env import SwarmIntegrator
 from gcbf_plus.env.swarm_integrator import Obstacle
 from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.utils.swarm_graph import build_swarm_graph_from_states
@@ -442,7 +442,7 @@ def run_simulation(
             params=env_params,
         )
     else:
-        env = DoubleIntegrator(
+        env = SwarmIntegrator(
             num_agents=num_agents, area_size=area_size, dt=dt, max_steps=max_steps,
             params={"n_obs": n_obs, "comm_radius": comm_radius},
         )
