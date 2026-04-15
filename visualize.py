@@ -43,6 +43,7 @@ from gcbf_plus.env.swarm_integrator import Obstacle
 from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.utils.swarm_graph import build_swarm_graph_from_states
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
+from gcbf_plus.algo.nominal_controller import NominalController
 from gcbf_plus.train_swarm import extract_agent_outputs
 
 
@@ -458,7 +459,6 @@ def run_simulation(
     payload_trajectories: List[np.ndarray] = []
     scale_trajectories: List[np.ndarray] = []
     edge_trajectories: List[np.ndarray] = []
-    lidar_trajectories: List[List[np.ndarray]] = []
 
     _use_payload = cfg.get("use_payload", True) if cfg else True
     trajectories.append(env.agent_states.detach().numpy().copy())
@@ -475,18 +475,22 @@ def run_simulation(
     else:
         edge_trajectories.append(np.empty((2, 0)))
     
-    # Store initial LiDAR hits (via _get_graph call above)
-    lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
-
     goals = env.goal_states.detach().numpy().copy()
     obstacle_info = [(obs.center.numpy().copy(), float(obs.radius))
                      for obs in env._obstacles]
 
-    # Control config
-    v_max_cfg = cfg.get("v_max", 1.0) if cfg else 1.0
-    K_pos_cfg = cfg.get("K_pos", 0.5) if cfg else 0.5
-    K_v_cfg = cfg.get("K_v", 2.0) if cfg else 2.0
-    K_s_cfg = cfg.get("K_s", 2.0) if cfg else 2.0
+    # Nominal controller (shared instance, consistent with training)
+    _u_max_viz = env.params.get("u_max", 9.0) if is_swarm else 9.0
+    nominal_ctrl = NominalController(
+        dt=dt,
+        mass=env.params.get("mass", 0.1) if is_swarm else 0.1,
+        comm_radius=comm_radius,
+        u_max=_u_max_viz,
+        u_max_scale=_u_max_viz * 0.3,
+        K_s_pos=env.params.get("K_s_pos", 1.0) if is_swarm else 1.0,
+        K_s=env.params.get("K_s", 2.0) if is_swarm else 2.0,
+    )
+
     # GNN acceleration output scale (must match train_swarm.py)
     a_max_gnn = 1.0    # m/s²
     a_max_gnn_s = 0.5  # s⁻²
@@ -497,20 +501,9 @@ def run_simulation(
         else:
             # affine_policy or hocbf_lqr — both use QP; differ only in u_nom source
             with torch.no_grad():
-                pos = env.agent_states[:, :2]
-                goal_pos = env.goal_states[:, :2]
-                v_current = env.agent_states[:, 2:4]
-                sc = env.scale_states[:, 0]
-                sd = env.scale_states[:, 1]
-
-                # PD nominal: translation toward goal, scale toward s_max
-                v_ref = K_pos_cfg * (goal_pos - pos)
-                speed = v_ref.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-                v_ref = v_ref * (speed.clamp(max=v_max_cfg) / speed)
-                s_dot_ref = 1.0 * (s_max - sc)
-                a_trans = K_v_cfg * (v_ref - v_current)
-                a_s = K_s_cfg * (s_dot_ref - sd)
-                u_nom = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+                u_nom = nominal_ctrl(
+                    env.agent_states, env.goal_states, env.scale_states,
+                )
 
                 if method == "affine_policy" and policy_net is not None:
                     # GNN → tanh → scale to physical acceleration offset
@@ -526,14 +519,6 @@ def run_simulation(
                 if no_scale:
                     u_nom[:, 2] = 0.0
 
-                # Pre-clamp to physically feasible range
-                _u_max = env.params.get("u_max")
-                if _u_max is not None:
-                    a_max_t = _u_max * 0.7
-                    a_max_s = _u_max * 0.3
-                    u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
-                    u_nom[:, 2]  = u_nom[:, 2].clamp(-a_max_s, a_max_s)
-
                 # GNN only: skip QP
                 if method == "gnn_only":
                     u = u_nom
@@ -546,17 +531,22 @@ def run_simulation(
                     curr_graph = env._get_graph()
                     edges = torch.stack([curr_graph.senders, curr_graph.receivers], dim=0)
                     edge_trajectories.append(edges.detach().numpy().copy())
-                    lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
                     if info["done"]:
                         break
                     continue
 
-                ps = env.payload_states if _use_payload else None
+                pos       = env.agent_states[:, :2]
+                v_current = env.agent_states[:, 2:4]
+                sc        = env.scale_states[:, 0]
+                sd        = env.scale_states[:, 1]
+                ps        = env.payload_states if _use_payload else None
 
-                # Obstacle hits from LiDAR — always returns (num_agents, 32, 4)
-                nb = 32
-                lidar_hits_4d = env.get_lidar_hits(num_beams=nb)  # (num_agents, nb, 4)
-                lidar_hits = lidar_hits_4d[..., :2]               # (num_agents, nb, 2)
+                # Obstacle centers per agent: (n_obs, 2) → (num_agents, n_obs, 2)
+                n_obs_env = env._obstacle_states.shape[0] if env._obstacle_states is not None else 0
+                obs_hits = (
+                    env._obstacle_states[:, :2]
+                    .unsqueeze(0).expand(num_agents, n_obs_env, 2)
+                ) if n_obs_env > 0 else None
 
                 # Agent-Agent info
                 if num_agents > 1:
@@ -578,7 +568,7 @@ def run_simulation(
                 if use_exact_qp and _QUADPROG_AVAILABLE:
                     u = solve_affine_qp_exact(
                         u_nom=u_nom,
-                        obs_hits=lidar_hits,
+                        obs_hits=obs_hits,
                         agent_pos=pos,
                         agent_vel=v_current,
                         s=sc,
@@ -602,7 +592,7 @@ def run_simulation(
                         print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
                     u = solve_affine_qp(
                         u_nom=u_nom,
-                        obs_hits=lidar_hits,
+                        obs_hits=obs_hits,
                         agent_pos=pos,
                         agent_vel=v_current,
                         s=sc,
@@ -641,8 +631,6 @@ def run_simulation(
         else:
             edge_trajectories.append(np.empty((2, 0)))
         
-        # Save LiDAR hits
-        lidar_trajectories.append([h.detach().numpy().copy() for h in env._last_lidar_hits])
         if step_idx == 0 or step_idx == max_steps - 1 or (step_idx % 100 == 0):
             print(f"  [DEBUG] Sim step {step_idx}: Extracted {edge_trajectories[-1].shape[1]} edges")
 
@@ -657,7 +645,7 @@ def run_simulation(
 
     cable_length = env.params.get("cable_length", 1.0) if hasattr(env, 'params') else 1.0
     return (trajectories, goals, obstacle_info, area_size, comm_radius, mode,
-            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_trajectories, lidar_trajectories)
+            is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_trajectories)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -670,7 +658,7 @@ def create_video(
     mode="lqr", comm_radius=1.5,
     is_swarm=False, R_form=0.3, r_margin=0.2,
     payload_traj=None, cable_length=1.0, scale_traj=None,
-    edge_traj=None, lidar_traj=None,
+    edge_traj=None,
 ):
     n_agents = trajectories.shape[1]
     total_frames = trajectories.shape[0]
@@ -880,46 +868,27 @@ def create_video(
             # In swarm_graph.py `build_swarm_graph_from_states` (used by DoubleIntegrator):
             # agents (0..n-1), obstacles (n..n+n_obs-1), goals (n+n_obs..2n+n_obs-1)
             n_obs_nodes = len(obstacle_info)
-            # Total nodes = agents (N) + goals (N) + total lidar hits
-            n_lidar_hits = sum(h.shape[0] for h in lidar_traj[sim_step]) if lidar_traj else 0
-            n_per = 2 * n_agents + n_lidar_hits
-            
+            n_per = 2 * n_agents + n_obs_nodes
+
             for e_idx in range(edges.shape[1]):
-                # Use modulo just in case, though unbatched shouldn't strictly need it
                 src = int(edges[0, e_idx]) % n_per
                 dst = int(edges[1, e_idx]) % n_per
-                
+
                 def get_pos(node_id):
                     # Agent states (0 to n-1)
                     if node_id < n_agents:
                         return (trajectories[sim_step, node_id, 0], trajectories[sim_step, node_id, 1])
-                    
-                    # Goal states (n to 2n - 1)
+                    # Goal states (n to 2n-1)
                     elif node_id < 2 * n_agents:
                         goal_idx = node_id - n_agents
                         if goal_idx < len(goals):
                             return (goals[goal_idx][0], goals[goal_idx][1])
                         return None
-                    
-                    # Obstacle / Hit Point states (2n onward)
+                    # Obstacle nodes (2n onward) — absolute centers
                     else:
-                        hit_idx = node_id - 2 * n_agents
-                        if lidar_traj is not None and sim_step < len(lidar_traj):
-                            # We need to find which agent this hit point belongs to
-                            current_total = 0
-                            for a_idx in range(n_agents):
-                                hits = lidar_traj[sim_step][a_idx]
-                                n_h = hits.shape[0]
-                                if current_total <= hit_idx < current_total + n_h:
-                                    local_idx = hit_idx - current_total
-                                    return (hits[local_idx, 0], hits[local_idx, 1])
-                                current_total += n_h
-                                
-                        # Fallback for old global centers (if any)
-                        if n_obs_nodes > 0:
-                            obs_idx = node_id - 2 * n_agents
-                            if obs_idx < n_obs_nodes:
-                                return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
+                        obs_idx = node_id - 2 * n_agents
+                        if obs_idx < n_obs_nodes:
+                            return (obstacle_info[obs_idx][0][0], obstacle_info[obs_idx][0][1])
                         return None
 
                 p1 = get_pos(src)
@@ -1162,7 +1131,7 @@ def main():
         method=args.method,
     )
     (trajectories, goals, obstacle_info, area, comm_r, mode,
-     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj, lidar_traj) = result
+     is_swarm, R_form, r_margin, payload_traj, cable_length, scale_traj, edge_traj) = result
     entity = "swarms" if is_swarm else "agents"
     print(f"  Recorded {trajectories.shape[0]} frames for "
           f"{trajectories.shape[1]} {entity}.  Mode: {mode}")
@@ -1185,7 +1154,7 @@ def main():
             mode=mode, comm_radius=comm_r,
             is_swarm=is_swarm, R_form=R_form, r_margin=r_margin,
             payload_traj=payload_traj, cable_length=cable_length, scale_traj=scale_traj,
-            edge_traj=edge_traj, lidar_traj=lidar_traj
+            edge_traj=edge_traj,
         )
     else:
         print("Plotting static image...")
