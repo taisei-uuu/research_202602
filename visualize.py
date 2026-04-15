@@ -150,7 +150,7 @@ def load_trained_policy(checkpoint_path: str):
     print(f"    agents={cfg['num_agents']}  area={cfg['area_size']}  "
           f"n_obs={cfg['n_obs']}  dt={cfg['dt']}  comm_radius={cfg['comm_radius']}")
     arch = cfg.get("architecture", "unknown")
-    use_payload = cfg.get("use_payload", True)
+    use_payload = cfg.get("use_payload", False)
     print(f"    architecture={arch}  R_form={cfg.get('R_form', 'N/A')}"
           f"  s_min={cfg.get('s_min', 'N/A')}  s_max={cfg.get('s_max', 'N/A')}"
           f"  use_payload={use_payload}")
@@ -460,7 +460,7 @@ def run_simulation(
     scale_trajectories: List[np.ndarray] = []
     edge_trajectories: List[np.ndarray] = []
 
-    _use_payload = cfg.get("use_payload", True) if cfg else True
+    _use_payload = cfg.get("use_payload", False) if cfg else False
     trajectories.append(env.agent_states.detach().numpy().copy())
     if _use_payload and hasattr(env, 'payload_states') and env.payload_states is not None:
         payload_trajectories.append(env.payload_states.detach().numpy().copy())
