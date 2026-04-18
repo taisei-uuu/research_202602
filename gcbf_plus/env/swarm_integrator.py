@@ -15,7 +15,6 @@ Safety:  Dynamic bounding circle collision (CoM distance < r_swarm_i + r_swarm_j
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -196,9 +195,6 @@ class SwarmIntegrator:
             obs_states.append(s)
         self._obstacle_states = torch.stack(obs_states) if obs_states else None
         
-        # LiDAR cache
-        self._last_lidar_hits: List[torch.Tensor] = [] # List of (N_hits, 4) per agent
-
         # Agent / goal positions (collision-free)
         start_pos = self._sample_free_positions(rng, n, margin)
         goal_pos = self._sample_free_positions(rng, n, margin)
@@ -367,104 +363,6 @@ class SwarmIntegrator:
             obs_collision = obs_collision | inside
 
         return agent_collision | obs_collision
-
-    def get_lidar_points(self, num_beams: int = 32) -> List[torch.Tensor]:
-        """
-        Generate LiDAR hit points for each agent.
-        Returns a list of length num_agents, where each element is a (M_i, 4) tensor
-        of [px, py, vx, vy] hit points (velocity is always 0 for obstacles).
-        """
-        n = self.num_agents
-        s_vals = self.scale_states[:, 0]
-        R_form = self.params.get("R_form", 0.5)
-        sensing_radii = R_form * s_vals + (self.comm_radius - R_form)
-        agent_pos = self.agent_states[:, :2]
-
-        all_agent_hits = []
-        
-        # Angles for radial beams
-        angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=agent_pos.device)[:-1]
-        directions = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1) # (N_beams, 2)
-        
-        for i in range(n):
-            start = agent_pos[i]
-            radius = sensing_radii[i]
-            agent_hits = []
-            
-            # Ends of the beams
-            beam_ends = start + radius * directions # (N_beams, 2)
-            
-            for b_idx in range(num_beams):
-                end = beam_ends[b_idx]
-                min_t = 1.1 # initialized to > 1
-                hit_pos = None
-                
-                for obs in self._obstacles:
-                    # Intersection check with rectangle boundary
-                    p_hit = obs.ray_intersection(start, end)
-                    if p_hit is not None:
-                        t = torch.norm(p_hit - start) / radius
-                        if t < min_t:
-                            min_t = t
-                            hit_pos = p_hit
-                
-                if hit_pos is not None:
-                    # hit_pos is (2,)
-                    hit_state = torch.zeros(4, device=agent_pos.device)
-                    hit_state[:2] = hit_pos
-                    # vx, vy = 0
-                    agent_hits.append(hit_state)
-            
-            if agent_hits:
-                all_agent_hits.append(torch.stack(agent_hits))
-            else:
-                all_agent_hits.append(torch.zeros((0, 4), device=agent_pos.device))
-                
-        self._last_lidar_hits = all_agent_hits
-        return all_agent_hits
-
-    def get_lidar_hits(self, num_beams: int = 32) -> torch.Tensor:
-        """
-        Fixed-size LiDAR hit points for each agent.
-        Returns: (num_agents, num_beams, 4) tensor.
-        Non-hitting beams are filled with 1e6 (far away, ignored in QP).
-        Matches VectorizedSwarmEnv.get_lidar_hits() interface.
-        """
-        n = self.num_agents
-        device = self.agent_states.device
-        s_vals = self.scale_states[:, 0]
-        R_form = self.params.get("R_form", 0.5)
-        sensing_radii = R_form * s_vals + (self.comm_radius - R_form)
-        agent_pos = self.agent_states[:, :2]
-
-        angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
-        directions = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # (nb, 2)
-
-        result = torch.full((n, num_beams, 4), 1e6, device=device)
-
-        for i in range(n):
-            start = agent_pos[i]
-            radius = sensing_radii[i]
-            beam_ends = start + radius * directions  # (nb, 2)
-
-            for b_idx in range(num_beams):
-                end = beam_ends[b_idx]
-                min_t = 1.1
-                hit_pos = None
-
-                for obs in self._obstacles:
-                    p_hit = obs.ray_intersection(start, end)
-                    if p_hit is not None:
-                        t = torch.norm(p_hit - start) / radius
-                        if t < min_t:
-                            min_t = t
-                            hit_pos = p_hit
-
-                if hit_pos is not None:
-                    result[i, b_idx, :2] = hit_pos
-                    result[i, b_idx, 2:] = 0.0  # vx, vy = 0
-
-        return result
 
     # ── Graph builder ─────────────────────────────────────────────────
     def _get_graph(self) -> GraphsTuple:

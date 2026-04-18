@@ -320,13 +320,14 @@ class AffinePolicy(MethodController):
                 u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
                 u_nom[:, 2]  = u_nom[:,  2].clamp(-a_max_s, a_max_s)
 
-            # QP — LiDAR hits + agent-agent info
+            # QP — obstacle centers + agent-agent info
             sc = env.scale_states[:, 0]
             sd = env.scale_states[:, 1]
             ps = env.payload_states if env.params.get("use_payload", True) else None
             n  = env.num_agents
 
-            lidar_hits = env.get_lidar_hits(num_beams=n_rays)[..., :2]
+            obs_st = env._obstacle_states  # (n_obs, 4) or None
+            obs_hits = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -341,7 +342,7 @@ class AffinePolicy(MethodController):
             if self.use_exact_qp and _QUADPROG_AVAILABLE:
                 u_qp, n_inf = solve_affine_qp_exact(
                     u_nom=u_nom,
-                    obs_hits=lidar_hits,
+                    obs_hits=obs_hits,
                     agent_pos=pos, agent_vel=v_current,
                     s=sc, s_dot=sd,
                     other_agent_pos=other_pos, other_agent_vel=other_vel,
@@ -362,7 +363,7 @@ class AffinePolicy(MethodController):
                     print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
                 u_qp = solve_affine_qp(
                     u_nom=u_nom,
-                    obs_hits=lidar_hits,
+                    obs_hits=obs_hits,
                     agent_pos=pos, agent_vel=v_current,
                     s=sc, s_dot=sd,
                     other_agent_pos=other_pos, other_agent_vel=other_vel,
@@ -445,9 +446,7 @@ class HOCBFWithLQR(MethodController):
         self.use_exact_qp = use_exact_qp
 
     def select_action(self, env, n_rays: int = 32):
-        s_max = env.params.get("s_max", 1.5)
-        s_dot_target = 1.0 * (s_max - env.scale_states[:, 0])
-        u_ref = env.nominal_controller(s_dot_target=s_dot_target)
+        u_ref = env.nominal_controller()
         if self.no_scale:
             u_ref[:, 2] = 0.0
         with torch.no_grad():
@@ -458,7 +457,8 @@ class HOCBFWithLQR(MethodController):
             ps  = env.payload_states if env.params.get("use_payload", True) else None
             n   = env.num_agents
 
-            lidar_hits = env.get_lidar_hits(num_beams=n_rays)[..., :2]
+            obs_st = env._obstacle_states  # (n_obs, 4) or None
+            obs_hits = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -473,7 +473,7 @@ class HOCBFWithLQR(MethodController):
             if self.use_exact_qp and _QUADPROG_AVAILABLE:
                 u_qp, n_inf = solve_affine_qp_exact(
                     u_nom=u_ref,
-                    obs_hits=lidar_hits,
+                    obs_hits=obs_hits,
                     agent_pos=pos, agent_vel=vel,
                     s=sc, s_dot=sd,
                     other_agent_pos=other_pos, other_agent_vel=other_vel,
@@ -494,7 +494,7 @@ class HOCBFWithLQR(MethodController):
                     print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
                 u_qp = solve_affine_qp(
                     u_nom=u_ref,
-                    obs_hits=lidar_hits,
+                    obs_hits=obs_hits,
                     agent_pos=pos, agent_vel=vel,
                     s=sc, s_dot=sd,
                     other_agent_pos=other_pos, other_agent_vel=other_vel,
@@ -523,9 +523,7 @@ class LQROnly(MethodController):
         self.no_scale = no_scale
 
     def select_action(self, env, n_rays: int = 32):
-        s_max = env.params.get("s_max", 1.5)
-        s_dot_target = 1.0 * (s_max - env.scale_states[:, 0])
-        u = env.nominal_controller(s_dot_target=s_dot_target)
+        u = env.nominal_controller()
         if self.no_scale:
             u[:, 2] = 0.0
         return u

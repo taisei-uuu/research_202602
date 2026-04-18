@@ -12,7 +12,6 @@ Control:     [a_cx, a_cy, a_s]         (3D — affine)
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -20,19 +19,8 @@ import torch
 
 from ..utils.graph import GraphsTuple
 from ..utils.swarm_graph import build_vectorized_swarm_graph
+from ..algo.nominal_controller import NominalController
 
-
-# ── LQR helper ───────────────────────────────────────────────────────
-
-def _dlqr(A, B, Q, R):
-    P = Q.copy()
-    for _ in range(1000):
-        K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
-        P_new = Q + A.T @ P @ A - A.T @ P @ B @ K
-        if np.max(np.abs(P_new - P)) < 1e-10:
-            break
-        P = P_new
-    return K
 
 
 class VectorizedSwarmEnv:
@@ -83,16 +71,14 @@ class VectorizedSwarmEnv:
         if params is not None:
             self.params.update(params)
 
-        # LQR gain (4D → 2D, translation only)
-        m = self.params["mass"]
-        A_ct = np.zeros((4, 4), dtype=np.float32)
-        A_ct[0, 2] = 1.0
-        A_ct[1, 3] = 1.0
-        A_t = A_ct * dt + np.eye(4, dtype=np.float32)
-        B_t = np.array([[0, 0], [0, 0], [1/m, 0], [0, 1/m]], dtype=np.float32) * dt
-        Q_t = np.eye(4, dtype=np.float32) * 5.0
-        R_t = np.eye(2, dtype=np.float32)
-        self._K = torch.tensor(_dlqr(A_t, B_t, Q_t, R_t), dtype=torch.float32)
+        # Nominal controller
+        self._nominal_ctrl = NominalController(
+            comm_radius=self.params["comm_radius"],
+            u_max=self.params["u_max"],
+            u_max_scale=self.params["u_max"] * 0.3,
+            K_s_pos=self.params.get("K_s_pos", 1.0),
+            K_s=self.params.get("K_s", 2.0),
+        )
 
         # State tensors (set on reset)
         self._agent_states: Optional[torch.Tensor] = None   # (B, n, 4)
@@ -102,7 +88,6 @@ class VectorizedSwarmEnv:
         self._obstacle_half_sizes: Optional[torch.Tensor] = None
         self._obstacle_states: Optional[torch.Tensor] = None
         self._payload_states: Optional[torch.Tensor] = None  # (B, n, 4)
-        self._last_lidar_hits: Optional[torch.Tensor] = None # (B, n, n_beams, 4) [px, py, vx, vy]
         self._step_counts: Optional[torch.Tensor] = None    # (B,) step count per batch
 
     @property
@@ -208,7 +193,6 @@ class VectorizedSwarmEnv:
         self._scale_states[:, :, 0] = 1.0  # s = 1.0
         self._payload_states = torch.zeros(B, n, 4, dtype=torch.float32, device=device)
         self._step_counts = torch.zeros(B, dtype=torch.long, device=device)
-        self._K = self._K.to(device)
 
     def _sample_free_pos(self, rng, count, margin, batch_idx):
         """Sample positions avoiding obstacles AND >= 2*r_swarm(s=1) apart."""
@@ -359,53 +343,12 @@ class VectorizedSwarmEnv:
 
         self._step_counts += 1
 
-    # ── Nominal controller (Level 1+2: velocity-command + PD tracking) ──
-    def nominal_controller(self, v_target=None, s_dot_target=None):
-        """Returns (B, n, 3): [a_cx_nom, a_cy_nom, a_s_nom].
-
-        Level 1: Compute target velocities.
-            v_ref = K_pos * (goal_pos - pos)   (proportional goal tracking)
-            v_target = v_ref + v_gnn_offset     (if provided externally)
-            s_dot_target = s_dot_gnn            (if provided externally)
-
-        Level 2: PD controller (velocity → acceleration).
-            a_trans_nom = K_v * (v_target - v_current)
-            a_s_nom     = K_s * (s_dot_target - s_dot_current)
-
-        Parameters
-        ----------
-        v_target : (B, n, 2) or None
-            Target translation velocity. If None, uses LQR-like v_ref.
-        s_dot_target : (B, n) or None
-            Target scale velocity. If None, uses 0.
-        """
-        K_pos = self.params.get("K_pos", 0.5)
-        K_v = self.params.get("K_v", 2.0)
-        K_s = self.params.get("K_s", 2.0)
-        v_max = self.params.get("v_max", 1.0)
-
-        # Level 1: target velocity from proportional goal tracking
-        if v_target is None:
-            pos = self._agent_states[:, :, :2]      # (B, n, 2)
-            goal_pos = self._goal_states[:, :, :2]   # (B, n, 2)
-            v_ref = K_pos * (goal_pos - pos)          # (B, n, 2)
-            # Clamp by vector norm to preserve direction
-            speed = v_ref.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-            v_ref = v_ref * (speed.clamp(max=v_max) / speed)
-            v_target = v_ref
-
-        if s_dot_target is None:
-            s_dot_target = torch.zeros_like(self._scale_states[:, :, 0])
-
-        # Level 2: PD controller
-        v_current = self._agent_states[:, :, 2:4]   # (B, n, 2)
-        s_dot_current = self._scale_states[:, :, 1]  # (B, n)
-
-        a_trans_nom = K_v * (v_target - v_current)    # (B, n, 2)
-        a_s_nom = K_s * (s_dot_target - s_dot_current)  # (B, n)
-
-        u = torch.cat([a_trans_nom, a_s_nom.unsqueeze(-1)], dim=-1)
-        return u  # (B, n, 3)
+    # ── Nominal controller ────────────────────────────────────────────────
+    def nominal_controller(self) -> torch.Tensor:
+        """Returns (B, n, 3): [a_cx_nom, a_cy_nom, a_s_nom]."""
+        return self._nominal_ctrl(
+            self._agent_states, self._goal_states, self._scale_states,
+        )
 
     # ── Unsafe mask (dynamic bounding circle) ─────────────────────────
     def unsafe_mask(self) -> torch.Tensor:
@@ -438,76 +381,6 @@ class VectorizedSwarmEnv:
             obs_collision = inside.any(dim=-1)  # (B, n)
 
         return agent_collision | obs_collision
-
-    def get_lidar_hits(self, num_beams: int = 32) -> torch.Tensor:
-        """
-        Vectorized LiDAR sensing against circular obstacles.
-        Returns: (B, n, num_beams, 4) [px, py, vx, vy] hit points.
-        Points that don't hit anything are set to a very far distance.
-        """
-        B = self.batch_size
-        n = self.num_agents
-        device = self._agent_states.device
-
-        pos = self._agent_states[:, :, :2]  # (B, n, 2)
-        s = self._scale_states[:, :, 0]     # (B, n)
-        R_form = self.params.get("R_form", 0.5)
-        sensing_radius = (R_form * s + (self.comm_radius - R_form)).unsqueeze(-1)  # (B, n, 1)
-
-        # 1. Setup beams
-        angles = torch.linspace(0, 2 * math.pi, num_beams + 1, device=device)[:-1]
-        dir_ = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)  # (nb, 2)
-
-        # Ray: p0 (B, n, 1, 2), p1 (B, n, nb, 2), D = p1 - p0
-        p0 = pos.unsqueeze(2)  # (B, n, 1, 2)
-        p1 = p0 + sensing_radius.unsqueeze(-1) * dir_.view(1, 1, num_beams, 2)
-        D = p1 - p0  # (B, n, nb, 2)
-
-        if self._obstacle_centers is None or self._obstacle_centers.shape[1] == 0:
-            hits = torch.full((B, n, num_beams, 4), 1e6, device=device)
-            self._last_lidar_hits = hits
-            return hits
-
-        n_obs = self._obstacle_centers.shape[1]
-
-        # 2. Ray-Circle Intersection (vectorized over B, n, beams, n_obs)
-        # f = p0 - center: (B, n, 1, n_obs, 2)
-        oc = self._obstacle_centers.view(B, 1, 1, n_obs, 2)   # (B, 1, 1, n_obs, 2)
-        or_ = self._obstacle_radii.view(B, 1, 1, n_obs)        # (B, 1, 1, n_obs)
-        f = p0.unsqueeze(3) - oc                               # (B, n, 1, n_obs, 2)
-        D_exp = D.unsqueeze(3)                                 # (B, n, nb, 1, 2)
-
-        a = (D_exp * D_exp).sum(dim=-1)      # (B, n, nb, n_obs)
-        b = 2.0 * (f * D_exp).sum(dim=-1)   # (B, n, nb, n_obs)  — f broadcast over nb
-        # f needs broadcasting: (B, n, 1, n_obs, 2) with D_exp (B, n, nb, 1, 2)
-        f_exp = p0.unsqueeze(3).expand(B, n, num_beams, n_obs, 2) - oc.expand(B, n, num_beams, n_obs, 2)
-        b = 2.0 * (f_exp * D_exp).sum(dim=-1)
-        c = (f_exp * f_exp).sum(dim=-1) - or_ ** 2            # (B, n, nb, n_obs)
-
-        disc = b * b - 4.0 * a * c                            # (B, n, nb, n_obs)
-        valid_disc = disc >= 0.0
-
-        sqrt_disc = torch.sqrt(torch.clamp(disc, min=0.0))
-        t1 = (-b - sqrt_disc) / (2.0 * a + 1e-8)              # nearest intersection
-        t2 = (-b + sqrt_disc) / (2.0 * a + 1e-8)
-
-        # Use t1 (nearest), fall back to t2 if t1 < 0, mark invalid if neither in [0,1]
-        t = torch.where(t1 >= 0.0, t1, t2)
-        valid = valid_disc & (t >= 0.0) & (t <= 1.0)
-        t = torch.where(valid, t, torch.full_like(t, 1.1))
-
-        # Closest obstacle per beam
-        min_t, _ = torch.min(t, dim=-1)     # (B, n, nb)
-        hit_mask = min_t <= 1.0
-
-        # Hit positions
-        hit_pos = p0 + min_t.unsqueeze(-1) * D  # (B, n, nb, 2)
-
-        res = torch.full((B, n, num_beams, 4), 1e6, device=device)
-        res[hit_mask, :2] = hit_pos[hit_mask]
-
-        self._last_lidar_hits = res
-        return res
 
     def get_done_masks(self) -> torch.Tensor:
         """

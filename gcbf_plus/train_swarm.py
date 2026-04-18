@@ -162,7 +162,7 @@ def train(
     print(f"  pool_size={N_pool}  mini_batch={batch_size}  epochs={n_epochs}")
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
-    print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
+    print(f"  Kp={nominal_ctrl.Kp}  Kd={nominal_ctrl.Kd}  K_s={nominal_ctrl.K_s}")
     print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_effort={coef_effort}  w_scale={w_scale}")
     print(f"  coef_arrival={coef_arrival}  arrival_radius={arrival_radius}m")
     print(f"  use_payload={use_payload}")
@@ -555,9 +555,9 @@ def train(
             "cable_length": cable_length,
             "gamma_min": gamma_min,
             "gamma_max_full": gamma_max_full,
-            "K_pos": K_pos,
-            "K_v": K_v,
-            "K_s": K_s,
+            "Kp": nominal_ctrl.Kp,
+            "Kd": nominal_ctrl.Kd,
+            "K_s": nominal_ctrl.K_s,
             "v_max": v_max,
             "s_dot_max": s_dot_max,
             "architecture": "hierarchical_velocity_command",
