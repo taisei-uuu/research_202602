@@ -271,10 +271,11 @@ class SwarmIntegrator:
         a_cy = action[:, 1]  # (n,)
         a_s = action[:, 2]   # (n,)
 
-        # Clamp translational acceleration
+        # Clamp translational acceleration (norm-based to preserve direction)
         a_trans = torch.stack([a_cx, a_cy], dim=-1)  # (n, 2)
         if u_max is not None:
-            a_trans = torch.clamp(a_trans, -u_max, u_max)
+            a_norm = a_trans.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            a_trans = a_trans * (a_norm.clamp(max=u_max) / a_norm)
 
         # ── Translation dynamics (CoM) ──
         accel = a_trans  # action is already acceleration (m/s²), consistent with vectorized_swarm
