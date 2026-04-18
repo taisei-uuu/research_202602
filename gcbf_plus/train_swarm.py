@@ -433,10 +433,10 @@ def train(
                 # One-step lookahead: gradient flows through pi_scaled (accel offset) → GNN
                 dist_mb = torch.norm(goal_pos_mb - agent_pos_mb, dim=-1, keepdim=True)
                 unit_vec_mb = (goal_pos_mb - agent_pos_mb) / (dist_mb + 1e-6)
-                v_ref_mb = unit_vec_mb * torch.clamp(K_pos * dist_mb, max=v_max)
+                v_ref_mb = unit_vec_mb * torch.clamp(nominal_ctrl.Kp * dist_mb, max=v_max)
                 v_ref_mb = torch.clamp(v_ref_mb, -v_max, v_max)
                 v_current_mb = mb_agent[:, :, 2:4].detach()
-                a_nom_mb = K_v * (v_ref_mb.detach() - v_current_mb)
+                a_nom_mb = nominal_ctrl.Kd * (v_ref_mb.detach() - v_current_mb)
                 a_total_mb = a_nom_mb + pi_scaled[:, :, :2]  # has grad through pi_scaled
 
                 dt = vec_env.dt
@@ -595,8 +595,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--no_payload", action="store_true", default=False,
-                        help="Disable payload dynamics and HOCBF constraint")
+    parser.add_argument("--use_payload", action="store_true", default=False,
+                        help="Enable payload dynamics and HOCBF constraint")
     parser.add_argument("--no_scale", action="store_true", default=False,
                         help="Fix formation scale at s=1.0 (ablation: no scale deformation)")
     parser.add_argument("--s_max_one", action="store_true", default=False,
@@ -606,7 +606,6 @@ def main():
     args = parser.parse_args()
     a = vars(args)
     a["checkpoint_path"] = a.pop("checkpoint")
-    a["use_payload"] = not a.pop("no_payload")
     a["a_max_gnn_arg"] = a.pop("a_max_gnn")
     train(**a)
 

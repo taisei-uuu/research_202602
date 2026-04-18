@@ -323,7 +323,7 @@ class AffinePolicy(MethodController):
             # QP — obstacle centers + agent-agent info
             sc = env.scale_states[:, 0]
             sd = env.scale_states[:, 1]
-            ps = env.payload_states if env.params.get("use_payload", True) else None
+            ps = env.payload_states if env.params.get("use_payload", False) else None
             n  = env.num_agents
 
             obs_st = env._obstacle_states  # (n_obs, 4) or None
@@ -454,7 +454,7 @@ class HOCBFWithLQR(MethodController):
             vel = env.agent_states[:, 2:4]
             sc  = env.scale_states[:, 0]
             sd  = env.scale_states[:, 1]
-            ps  = env.payload_states if env.params.get("use_payload", True) else None
+            ps  = env.payload_states if env.params.get("use_payload", False) else None
             n   = env.num_agents
 
             obs_st = env._obstacle_states  # (n_obs, 4) or None
@@ -585,7 +585,7 @@ def evaluate_episode(
         scale_values.append(s_curr)
 
         # Payload swing: gamma = sqrt(gamma_x^2 + gamma_y^2)
-        use_payload = env.params.get("use_payload", True)
+        use_payload = env.params.get("use_payload", False)
         if use_payload:
             gamma = torch.sqrt(env.payload_states[:, 0]**2 + env.payload_states[:, 1]**2)
             max_gamma = max(max_gamma, gamma.max().item())
