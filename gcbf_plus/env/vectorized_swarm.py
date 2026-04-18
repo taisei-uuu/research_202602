@@ -47,7 +47,7 @@ class VectorizedSwarmEnv:
         "n_obs": 2,
         "obs_len_range": (0.4, 1.0),
         "mass": 0.1,
-        "u_max": 9.0,
+        "u_max": 1.0,
         "v_max": 1.0,
         # Scale limits
         "s_min": 0.4,
@@ -295,10 +295,8 @@ class VectorizedSwarmEnv:
     # ── Step ──────────────────────────────────────────────────────────
     def step(self, action: torch.Tensor):
         """action: (B, n, 3) — [a_cx, a_cy, a_s] per swarm."""
-        m = self.params["mass"]
         dt = self.dt
         u_max = self.params.get("u_max")
-        v_max = self.params.get("v_max")
         s_dot_max = self.params.get("s_dot_max", 1.0)
 
         # Split affine parameters

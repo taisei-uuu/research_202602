@@ -78,7 +78,7 @@ class SwarmIntegrator:
         "n_obs": 2,
         "obs_len_range": (0.4, 1.0),
         "mass": 0.1,
-        "u_max": 9.0,
+        "u_max": 1.0,
         "v_max": 1.0,
         # Scale limits
         "s_min": 0.4,            # minimum scale (drone collision prevention)
@@ -262,10 +262,8 @@ class SwarmIntegrator:
         Applies affine distribution to compute per-swarm CoM acceleration,
         integrates scale dynamics, and updates payload swing.
         """
-        m = self.params["mass"]
         dt = self.dt
         u_max = self.params.get("u_max")
-        v_max = self.params.get("v_max")
         s_dot_max = self.params.get("s_dot_max", 1.0)
 
         # Split affine parameters
