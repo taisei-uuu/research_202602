@@ -79,7 +79,7 @@ class NominalController:
         if Q is None:
             Q = np.eye(4, dtype=np.float32) * 5.0
         if R is None:
-            R = np.eye(2, dtype=np.float32) * 10.0
+            R = np.eye(2, dtype=np.float32) * 20.0
 
         K_np = _dlqr(A, B, Q, R)  # (2, 4)
         self._K = torch.tensor(K_np, dtype=torch.float32)  # registered on CPU; moved in __call__
