@@ -55,7 +55,7 @@ def extract_agent_outputs(
 
 
 def train(
-    num_agents: int = 3,
+    num_agents: int = 1,
     area_size: float = 15.0,
     n_obs: int = 6,
     num_steps: int = 10000,
@@ -574,7 +574,7 @@ def train(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Hierarchical Velocity-Command Swarm Policy")
-    parser.add_argument("--num_agents", type=int, default=3)
+    parser.add_argument("--num_agents", type=int, default=1)
     parser.add_argument("--area_size", type=float, default=15.0)
     parser.add_argument("--n_obs", type=int, default=6)
     parser.add_argument("--num_steps", type=int, default=10000)
