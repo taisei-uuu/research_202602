@@ -10,8 +10,8 @@ Architecture (4 Levels):
     Level 4: env.step(X*) → distribute to individual drones
 
 Data collection:
-    Roll out `horizon` steps × `batch_size` envs → pool of N_total samples.
-    Shuffle pool, draw `mini_batch_size` samples, train for `n_epochs` epochs.
+    Roll out `horizon` steps × `n_env_train` envs → pool of N_total samples.
+    Shuffle pool, draw `batch_size` samples, train for `n_epochs` epochs.
 
 Loss:
     L_goal:  Goal‐reaching incentive
@@ -59,10 +59,10 @@ def train(
     area_size: float = 15.0,
     n_obs: int = 6,
     num_steps: int = 10000,
-    batch_size: int = 256,
+    n_env_train: int = 32,
     horizon: int = 32,
-    mini_batch_size: int = 128,
-    n_epochs: int = 4,
+    batch_size: int = 256,
+    n_epochs: int = 1,
     lr_actor: float = 1e-4,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
@@ -99,7 +99,7 @@ def train(
         env_override["s_max"] = 1.0
     vec_env = VectorizedSwarmEnv(
         num_agents=num_agents,
-        batch_size=batch_size,
+        batch_size=n_env_train,
         area_size=area_size,
         params=env_override,
         max_steps=512,
@@ -148,7 +148,7 @@ def train(
     payload_damping = vec_env.params["payload_damping"]
 
     # Pool size
-    N_pool = horizon * batch_size
+    N_pool = horizon * n_env_train
 
     history: Dict[str, list] = {
         "step": [], "loss/total": [], "loss/progress": [],
@@ -157,9 +157,9 @@ def train(
 
     print("=" * 60)
     print(f"  Hierarchical Velocity-Command Swarm Training")
-    print(f"  swarms={num_agents}  batch={batch_size}  horizon={horizon}"
+    print(f"  swarms={num_agents}  batch={n_env_train}  horizon={horizon}"
           f"  area={area_size}")
-    print(f"  pool_size={N_pool}  mini_batch={mini_batch_size}  epochs={n_epochs}")
+    print(f"  pool_size={N_pool}  mini_batch={batch_size}  epochs={n_epochs}")
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  K_pos={K_pos}  K_v={K_v}  K_s={K_s}")
@@ -203,8 +203,8 @@ def train(
                 mega = vec_env.build_batch_graph()
                 pi_raw = policy_net.gnn_layers[0](mega)  # no tanh yet (raw)
                 pi_tanh = torch.tanh(pi_raw)
-                pi_agents = extract_agent_outputs(pi_tanh, num_agents, N_per, batch_size)
-                pi_agents = pi_agents.reshape(batch_size, num_agents, 3)
+                pi_agents = extract_agent_outputs(pi_tanh, num_agents, N_per, n_env_train)
+                pi_agents = pi_agents.reshape(n_env_train, num_agents, 3)
 
                 # Scale to physical units: (Δa_cx, Δa_cy) * a_max_gnn, Δa_s * a_max_gnn_s
                 pi_scaled = pi_agents.clone()
@@ -219,7 +219,7 @@ def train(
                 ) + pi_scaled
 
                 # Level 3: QP solve
-                BN = batch_size * num_agents
+                BN = n_env_train * num_agents
                 u_nom_flat = u_nom.reshape(BN, 3)
                 pos_flat = vec_env._agent_states[:, :, :2].reshape(BN, 2)
                 vel_flat = vec_env._agent_states[:, :, 2:4].reshape(BN, 2)
@@ -231,7 +231,7 @@ def train(
                 n_obs_qp = vec_env._obstacle_states.shape[1]
                 obs_hits_flat = (
                     vec_env._obstacle_states[:, :, :2]
-                    .unsqueeze(1).expand(batch_size, num_agents, n_obs_qp, 2)
+                    .unsqueeze(1).expand(n_env_train, num_agents, n_obs_qp, 2)
                     .reshape(BN, n_obs_qp, 2)
                 ) if n_obs_qp > 0 else None
 
@@ -240,18 +240,18 @@ def train(
                     dev = vec_env._agent_states.device
                     agent_idx = torch.arange(num_agents, device=dev)
                     mask = agent_idx.unsqueeze(0) != agent_idx.unsqueeze(1) # (n, n)
-                    mask_b = mask.unsqueeze(0).expand(batch_size, num_agents, num_agents)
+                    mask_b = mask.unsqueeze(0).expand(n_env_train, num_agents, num_agents)
                     
-                    pos_other = vec_env._agent_states[:, :, :2].unsqueeze(1).expand(batch_size, num_agents, num_agents, 2)
+                    pos_other = vec_env._agent_states[:, :, :2].unsqueeze(1).expand(n_env_train, num_agents, num_agents, 2)
                     other_pos_flat = pos_other[mask_b].view(BN, num_agents - 1, 2)
                     
-                    vel_other = vec_env._agent_states[:, :, 2:4].unsqueeze(1).expand(batch_size, num_agents, num_agents, 2)
+                    vel_other = vec_env._agent_states[:, :, 2:4].unsqueeze(1).expand(n_env_train, num_agents, num_agents, 2)
                     other_vel_flat = vel_other[mask_b].view(BN, num_agents - 1, 2)
                     
-                    s_other = vec_env._scale_states[:, :, 0].unsqueeze(1).expand(batch_size, num_agents, num_agents)
+                    s_other = vec_env._scale_states[:, :, 0].unsqueeze(1).expand(n_env_train, num_agents, num_agents)
                     other_s_flat = s_other[mask_b].view(BN, num_agents - 1)
                     
-                    sd_other = vec_env._scale_states[:, :, 1].unsqueeze(1).expand(batch_size, num_agents, num_agents)
+                    sd_other = vec_env._scale_states[:, :, 1].unsqueeze(1).expand(n_env_train, num_agents, num_agents)
                     other_sd_flat = sd_other[mask_b].view(BN, num_agents - 1)
                 else:
                     other_pos_flat = None
@@ -276,7 +276,7 @@ def train(
                     payload_damping=payload_damping,
                     u_max=u_max,
                 )
-                u_qp = u_qp_flat.reshape(batch_size, num_agents, 3)
+                u_qp = u_qp_flat.reshape(n_env_train, num_agents, 3)
 
                 # Level 4: env.step distributes to drones
                 vec_env.step(u_qp)
@@ -304,7 +304,7 @@ def train(
             info["life/avg"] = cur_steps.mean().item()
             info["life/max"] = cur_steps.max().item()
             info["life/min"] = cur_steps.min().item()
-            info["life/reset_rate"] = (reset_count / (batch_size * horizon))
+            info["life/reset_rate"] = (reset_count / (n_env_train * horizon))
             info["reset/goal"]      = goal_count
             info["reset/collision"] = collision_count
             info["reset/timeout"]   = timeout_count
@@ -329,10 +329,10 @@ def train(
             if epoch > 0:
                 perm = torch.randperm(N_pool, device=dev)
 
-            n_batches = max(1, N_pool // mini_batch_size)
+            n_batches = max(1, N_pool // batch_size)
 
             for bi in range(n_batches):
-                idx = perm[bi * mini_batch_size : (bi + 1) * mini_batch_size]
+                idx = perm[bi * batch_size : (bi + 1) * batch_size]
                 mb_size = idx.shape[0]
 
                 mb_agent = all_agent[idx]
@@ -578,10 +578,10 @@ def main():
     parser.add_argument("--area_size", type=float, default=15.0)
     parser.add_argument("--n_obs", type=int, default=6)
     parser.add_argument("--num_steps", type=int, default=10000)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--n_env_train", type=int, default=32)
     parser.add_argument("--horizon", type=int, default=32)
-    parser.add_argument("--mini_batch_size", type=int, default=128)
-    parser.add_argument("--n_epochs", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--n_epochs", type=int, default=1)
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--coef_goal", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
