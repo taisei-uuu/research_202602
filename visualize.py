@@ -482,8 +482,6 @@ def run_simulation(
     # Nominal controller (shared instance, consistent with training)
     _u_max_viz = env.params.get("u_max", 9.0) if is_swarm else 9.0
     nominal_ctrl = NominalController(
-        dt=dt,
-        mass=env.params.get("mass", 0.1) if is_swarm else 0.1,
         comm_radius=comm_radius,
         u_max=_u_max_viz,
         u_max_scale=_u_max_viz * 0.3,

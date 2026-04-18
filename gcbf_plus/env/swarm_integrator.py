@@ -112,10 +112,8 @@ class SwarmIntegrator:
         if params is not None:
             self.params.update(params)
 
-        # Nominal controller (LQR-based, shared across eval and training)
+        # Nominal controller (PD, shared across eval and training)
         self._nominal_ctrl = NominalController(
-            dt=dt,
-            mass=self.params["mass"],
             comm_radius=self.params["comm_radius"],
             u_max=self.params["u_max"],
             u_max_scale=self.params.get("u_max_scale", self.params["u_max"] * 0.3),

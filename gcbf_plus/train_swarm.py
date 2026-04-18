@@ -129,8 +129,6 @@ def train(
 
     # Nominal controller (shared instance)
     nominal_ctrl = NominalController(
-        dt=vec_env.dt,
-        mass=vec_env.params["mass"],
         comm_radius=vec_env.params["comm_radius"],
         u_max=u_max,
         u_max_scale=u_max * 0.3,
