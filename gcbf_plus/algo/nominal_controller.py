@@ -39,8 +39,8 @@ class NominalController:
         comm_radius: float,
         u_max: float,
         u_max_scale: float,
-        Kp: float = 5.0,
-        Kd: float = 2.0,
+        Kp: float = 0.5,
+        Kd: float = 1.0,
         K_s_pos: float = 1.0,
         K_s: float = 2.0,
     ):
