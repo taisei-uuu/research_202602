@@ -226,10 +226,10 @@ def run_episode(args):
             )
 
             history["total"].append(reward_info["reward/total"])
-            history["progress"].append(reward_info["reward/progress"])
-            history["arrival"].append(reward_info["reward/arrival"])
-            history["qp"].append(reward_info["reward/qp"])
-            history["avoid"].append(reward_info["reward/avoid"])
+            history["progress"].append(reward_info["reward/progress"] * args.coef_progress)
+            history["arrival"].append(reward_info["reward/arrival"]  * args.coef_arrival)
+            history["qp"].append(reward_info["reward/qp"]            * args.coef_qp)
+            history["avoid"].append(reward_info["reward/avoid"]      * args.coef_avoid)
             history["dist_to_goal"].append(dist_after.mean().item())
 
             if info["done"]:
@@ -261,12 +261,12 @@ def run_episode(args):
         ax.text(0.98, 0.02, f"sum={sum(data):.3f}",
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=9)
 
-    plot(axes[0, 0], history["total"],        "Total Reward",      "black")
-    plot(axes[0, 1], history["dist_to_goal"], "Dist to Goal (m)",  "purple", "m")
-    plot(axes[1, 0], history["progress"],     "R_progress",        "steelblue")
-    plot(axes[1, 1], history["arrival"],      "R_arrival",         "green")
-    plot(axes[2, 0], history["qp"],           "R_qp",              "red")
-    plot(axes[2, 1], history["avoid"],        "R_avoid",           "orange")
+    plot(axes[0, 0], history["total"],        "Total Reward",                              "black")
+    plot(axes[0, 1], history["dist_to_goal"], "Dist to Goal (m)",                          "purple", "m")
+    plot(axes[1, 0], history["progress"],     f"R_progress × {args.coef_progress}",        "steelblue")
+    plot(axes[1, 1], history["arrival"],      f"R_arrival × {args.coef_arrival}",          "green")
+    plot(axes[2, 0], history["qp"],           f"R_qp × {args.coef_qp}",                   "red")
+    plot(axes[2, 1], history["avoid"],        f"R_avoid × {args.coef_avoid}",              "orange")
 
     plt.tight_layout()
     plt.savefig(args.output, dpi=150)
