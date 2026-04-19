@@ -621,7 +621,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--n_epochs", type=int, default=1)
     parser.add_argument("--lr_actor", type=float, default=1e-4)
-    parser.add_argument("--coef_goal", type=float, default=1.0)
+    parser.add_argument("--coef_progress", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
     parser.add_argument("--coef_avoid", type=float, default=1.0,
                         help="Proactive obstacle avoidance reward coefficient (default 1.0)")
