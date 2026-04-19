@@ -539,11 +539,15 @@ def run_simulation(
                 sd        = env.scale_states[:, 1]
                 ps        = env.payload_states if _use_payload else None
 
-                # Obstacle centers per agent: (n_obs, 2) → (num_agents, n_obs, 2)
+                # Obstacle centers/radii per agent: (n_obs, 2/1) → (num_agents, n_obs, 2/1)
                 n_obs_env = env._obstacle_states.shape[0] if env._obstacle_states is not None else 0
                 obs_hits = (
                     env._obstacle_states[:, :2]
                     .unsqueeze(0).expand(num_agents, n_obs_env, 2)
+                ) if n_obs_env > 0 else None
+                obs_radii_viz = (
+                    torch.tensor([obs.radius for obs in env._obstacles], dtype=torch.float32)
+                    .unsqueeze(0).expand(num_agents, n_obs_env)
                 ) if n_obs_env > 0 else None
 
                 # Agent-Agent info
@@ -591,6 +595,7 @@ def run_simulation(
                     u = solve_affine_qp(
                         u_nom=u_nom,
                         obs_hits=obs_hits,
+                        obs_radii=obs_radii_viz,
                         agent_pos=pos,
                         agent_vel=v_current,
                         s=sc,

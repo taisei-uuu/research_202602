@@ -140,7 +140,7 @@ def run_episode(args):
                 .unsqueeze(0).expand(n, n_obs_env, 2)
             ) if n_obs_env > 0 else None
             obs_radii_flat = (
-                env._obstacle_states[:, 2]
+                torch.tensor([obs.radius for obs in env._obstacles], dtype=torch.float32)
                 .unsqueeze(0).expand(n, n_obs_env)
             ) if n_obs_env > 0 else None
 
