@@ -546,7 +546,11 @@ def train(
             pi_mean = avg_info.get("gnn/pi_mean", 0.0)
             pi_max  = avg_info.get("gnn/pi_max",  0.0)
             print(f"Step {step:5d} | "
-                  f"R: {avg_info['reward/total']:.4f} (qp:{avg_info['reward/qp']:.4f}, pr:{avg_info['reward/progress']:.4f}, ar:{avg_info.get('reward/arrival',0):.4f}, av:{avg_info.get('reward/avoid',0):.4f}) | "
+                  f"R: {avg_info['reward/total']:.4f} ("
+                  f"qp:{avg_info['reward/qp'] * coef_qp:.4f}, "
+                  f"pr:{avg_info['reward/progress'] * coef_progress:.4f}, "
+                  f"ar:{avg_info.get('reward/arrival', 0) * coef_arrival:.4f}, "
+                  f"av:{avg_info.get('reward/avoid', 0) * coef_avoid:.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
                   f"{payload_str}"
                   f" | GNN: {pi_mean:.3f}/{pi_max:.3f}")
