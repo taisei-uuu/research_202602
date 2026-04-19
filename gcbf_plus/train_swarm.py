@@ -173,6 +173,7 @@ def train(
     info = {
         "life/avg": 0.0, "life/min": 0.0, "life/max": 0.0, "life/reset_rate": 0.0
     }
+    interval_losses = []  # log_interval 分のミニバッチ結果を蓄積
 
     for step in range(1, num_steps + 1):
 
@@ -509,6 +510,7 @@ def train(
 
                 batch_info["grad_norm"] = grad_norm.item()
                 epoch_losses.append(batch_info)
+                interval_losses.append(batch_info)
 
         # ============================================================
         # Logging
@@ -517,8 +519,9 @@ def train(
             elapsed = time.time() - t_start
 
             avg_info = {}
-            for k in epoch_losses[0]:
-                avg_info[k] = np.mean([d[k] for d in epoch_losses])
+            for k in interval_losses[0]:
+                avg_info[k] = np.mean([d[k] for d in interval_losses])
+            interval_losses = []  # リセット
 
             with torch.no_grad():
                 all_s_vals = all_scale[:, :, 0]

@@ -327,7 +327,11 @@ class AffinePolicy(MethodController):
             n  = env.num_agents
 
             obs_st = env._obstacle_states  # (n_obs, 4) or None
-            obs_hits = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
+            obs_hits  = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
+            obs_radii = (
+                torch.tensor([o.radius for o in env._obstacles], dtype=torch.float32)
+                .unsqueeze(0).expand(n, -1)
+            ) if obs_st is not None else None
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -364,6 +368,7 @@ class AffinePolicy(MethodController):
                 u_qp = solve_affine_qp(
                     u_nom=u_nom,
                     obs_hits=obs_hits,
+                    obs_radii=obs_radii,
                     agent_pos=pos, agent_vel=v_current,
                     s=sc, s_dot=sd,
                     other_agent_pos=other_pos, other_agent_vel=other_vel,
@@ -429,7 +434,11 @@ class HOCBFWithLQR(MethodController):
             n   = env.num_agents
 
             obs_st = env._obstacle_states  # (n_obs, 4) or None
-            obs_hits = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
+            obs_hits  = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
+            obs_radii = (
+                torch.tensor([o.radius for o in env._obstacles], dtype=torch.float32)
+                .unsqueeze(0).expand(n, -1)
+            ) if obs_st is not None else None
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -466,6 +475,7 @@ class HOCBFWithLQR(MethodController):
                 u_qp = solve_affine_qp(
                     u_nom=u_ref,
                     obs_hits=obs_hits,
+                    obs_radii=obs_radii,
                     agent_pos=pos, agent_vel=vel,
                     s=sc, s_dot=sd,
                     other_agent_pos=other_pos, other_agent_vel=other_vel,
