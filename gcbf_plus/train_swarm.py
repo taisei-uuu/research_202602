@@ -64,7 +64,7 @@ def train(
     batch_size: int = 256,
     n_epochs: int = 1,
     lr_actor: float = 1e-4,
-    coef_goal: float = 1.0,
+    coef_progress: float = 1.0,
     coef_qp: float = 2.0,
     coef_avoid: float = 1.0,
     avoid_sigma: float = 1.5,
@@ -163,7 +163,7 @@ def train(
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  Kp={nominal_ctrl.Kp}  Kd={nominal_ctrl.Kd}  K_s={nominal_ctrl.K_s}")
-    print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_avoid={coef_avoid}  avoid_sigma={avoid_sigma}")
+    print(f"  coef_progress={coef_progress}  coef_qp={coef_qp}  coef_avoid={coef_avoid}  avoid_sigma={avoid_sigma}")
     print(f"  coef_arrival={coef_arrival}  arrival_radius={arrival_radius}m")
     print(f"  use_payload={use_payload}")
     print("=" * 60)
@@ -487,7 +487,7 @@ def train(
                     agent_vel=mb_agent.reshape(-1, 4)[:, 2:4].detach(),
                     obs_centers=obs_centers_flat,
                     obs_radii=obs_radii_flat,
-                    coef_progress=coef_goal,
+                    coef_progress=coef_progress,
                     coef_qp=coef_qp,
                     coef_avoid=coef_avoid,
                     avoid_sigma=avoid_sigma,

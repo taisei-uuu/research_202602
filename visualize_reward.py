@@ -195,6 +195,12 @@ def run_episode(args):
                 agent_vel=vel_flat,
                 obs_centers=obs_hits_flat,
                 obs_radii=obs_radii_flat,
+                coef_progress=args.coef_progress,
+                coef_qp=args.coef_qp,
+                coef_avoid=args.coef_avoid,
+                avoid_sigma=args.avoid_sigma,
+                coef_arrival=args.coef_arrival,
+                arrival_radius=args.arrival_radius,
             )
 
             history["total"].append(reward_info["reward/total"])
@@ -248,12 +254,19 @@ def run_episode(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--seed",       type=int, default=42)
-    parser.add_argument("--num_agents", type=int, default=1)
-    parser.add_argument("--n_obs",      type=int, default=6)
-    parser.add_argument("--area_size",  type=float, default=10.0)
-    parser.add_argument("--max_steps",  type=int, default=512)
-    parser.add_argument("--output",     type=str, default="reward_episode.png")
+    parser.add_argument("--checkpoint",    type=str,   default=None)
+    parser.add_argument("--seed",          type=int,   default=42)
+    parser.add_argument("--num_agents",    type=int,   default=1)
+    parser.add_argument("--n_obs",         type=int,   default=6)
+    parser.add_argument("--area_size",     type=float, default=10.0)
+    parser.add_argument("--max_steps",     type=int,   default=512)
+    parser.add_argument("--output",        type=str,   default="reward_episode.png")
+    # 報酬係数 (train_swarm.py のデフォルトと揃えてある)
+    parser.add_argument("--coef_progress", type=float, default=1.0)
+    parser.add_argument("--coef_qp",       type=float, default=2.0)
+    parser.add_argument("--coef_avoid",    type=float, default=1.0)
+    parser.add_argument("--avoid_sigma",   type=float, default=1.5)
+    parser.add_argument("--coef_arrival",  type=float, default=5.0)
+    parser.add_argument("--arrival_radius",type=float, default=0.3)
     args = parser.parse_args()
     run_episode(args)
