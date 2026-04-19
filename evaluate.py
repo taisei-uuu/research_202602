@@ -261,7 +261,7 @@ class MethodController(ABC):
         self.total_qp_calls: int = 0
 
     @abstractmethod
-    def select_action(self, env: SwarmIntegrator, n_rays: int = 32) -> torch.Tensor:
+    def select_action(self, env: SwarmIntegrator) -> torch.Tensor:
         ...
 
 
@@ -282,7 +282,7 @@ class AffinePolicy(MethodController):
         self.a_max_gnn = a_max_gnn
         self._nominal_ctrl = None  # 初回 select_action で env から生成
 
-    def select_action(self, env, n_rays: int = 32):
+    def select_action(self, env):
         with torch.no_grad():
             # NominalController を env パラメータから生成（訓練と同一）
             if self._nominal_ctrl is None:
@@ -314,6 +314,8 @@ class AffinePolicy(MethodController):
             _u_max = env.params.get("u_max")
 
             # QP — obstacle centers + agent-agent info
+            pos       = env.agent_states[:, :2]
+            v_current = env.agent_states[:, 2:4]
             sc = env.scale_states[:, 0]
             sd = env.scale_states[:, 1]
             ps = env.payload_states if env.params.get("use_payload", False) else None
@@ -391,7 +393,7 @@ class GNNOnly(MethodController):
         self.cfg = cfg
         self.no_scale = no_scale
 
-    def select_action(self, env, n_rays: int = 32):
+    def select_action(self, env):
         with torch.no_grad():
             graph = env._get_graph()
             pi_tanh = self.policy_net(graph)
@@ -414,7 +416,7 @@ class HOCBFWithLQR(MethodController):
         self.no_scale = no_scale
         self.use_exact_qp = use_exact_qp
 
-    def select_action(self, env, n_rays: int = 32):
+    def select_action(self, env):
         u_ref = env.nominal_controller()
         if self.no_scale:
             u_ref[:, 2] = 0.0
@@ -496,7 +498,7 @@ class LQROnly(MethodController):
     def __init__(self, no_scale: bool = False):
         self.no_scale = no_scale
 
-    def select_action(self, env, n_rays: int = 32):
+    def select_action(self, env):
         u = env.nominal_controller()
         if self.no_scale:
             u[:, 2] = 0.0
@@ -513,7 +515,6 @@ def evaluate_episode(
     seed: int,
     max_steps: int = 512,
     goal_radius: float = 0.3,
-    n_rays: int = 32,
 ):
     """Run one episode, return metrics dict."""
     env.reset(seed=seed)
@@ -535,7 +536,7 @@ def evaluate_episode(
     cable_length = env.params.get("cable_length", 1.0)
 
     for t in range(max_steps):
-        action = method.select_action(env, n_rays=n_rays)
+        action = method.select_action(env)
         _, info = env.step(action)
 
         # Control effort: ||a_c||  (translation only, per agent, summed over agents and time)
@@ -646,8 +647,6 @@ def main():
                         help="Fix scale at s=1.0 (ablation: no formation deformation)")
     parser.add_argument("--s_max_one", action="store_true", default=False,
                         help="Cap scale at s_max=1.0 (no expansion, but shrink allowed)")
-    parser.add_argument("--n_rays", type=int, default=32,
-                        help="Number of LiDAR rays for obstacle sensing (default: 32)")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--area_size", type=float, default=None,
@@ -716,7 +715,7 @@ def main():
         metrics_list = []
         for ep in range(args.episodes):
             seed = args.seed_start + ep
-            m = evaluate_episode(method, env, seed=seed, max_steps=args.max_steps, n_rays=args.n_rays)
+            m = evaluate_episode(method, env, seed=seed, max_steps=args.max_steps)
             metrics_list.append(m)
 
         # Aggregate
