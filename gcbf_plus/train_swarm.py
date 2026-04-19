@@ -159,7 +159,7 @@ def train(
     print(f"  Hierarchical Velocity-Command Swarm Training")
     print(f"  swarms={num_agents}  batch={n_env_train}  horizon={horizon}"
           f"  area={area_size}")
-    print(f"  pool_size={N_pool}  mini_batch={batch_size}  epochs={n_epochs}")
+    print(f"  pool_size={N_pool}  batch_size={batch_size}  epochs={n_epochs}")
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  Kp={nominal_ctrl.Kp}  Kd={nominal_ctrl.Kd}  K_s={nominal_ctrl.K_s}")
@@ -227,12 +227,17 @@ def train(
                 s_dot_flat = vec_env._scale_states[:, :, 1].reshape(BN)
                 ps_flat = vec_env._payload_states.reshape(BN, 4)
 
-                # Obstacle centers per agent: (B, n_obs, 2) → (BN, n_obs, 2)
+                # Obstacle centers/radii per agent: (B, n_obs, 2/1) → (BN, n_obs, 2/1)
                 n_obs_qp = vec_env._obstacle_states.shape[1]
                 obs_hits_flat = (
                     vec_env._obstacle_states[:, :, :2]
                     .unsqueeze(1).expand(n_env_train, num_agents, n_obs_qp, 2)
                     .reshape(BN, n_obs_qp, 2)
+                ) if n_obs_qp > 0 else None
+                obs_radii_qp = (
+                    vec_env._obstacle_states[:, :, 2]
+                    .unsqueeze(1).expand(n_env_train, num_agents, n_obs_qp)
+                    .reshape(BN, n_obs_qp)
                 ) if n_obs_qp > 0 else None
 
                 # Agent-Agent info
@@ -262,6 +267,7 @@ def train(
                 u_qp_flat = solve_affine_qp(
                     u_nom=u_nom_flat,
                     obs_hits=obs_hits_flat,
+                    obs_radii=obs_radii_qp,
                     agent_pos=pos_flat, agent_vel=vel_flat,
                     s=s_flat, s_dot=s_dot_flat,
                     other_agent_pos=other_pos_flat,
@@ -376,12 +382,17 @@ def train(
                     sd_f = mb_scale.reshape(-1, 2)[:, 1]
                     ps_f = mb_payload.reshape(-1, 4)
 
-                    # Obstacle centers per agent: (mb, n_obs, 2) → (mb*n, n_obs, 2)
+                    # Obstacle centers/radii per agent: (mb, n_obs, 2/1) → (mb*n, n_obs, 2/1)
                     _n_obs = mb_obs_st.shape[1]
                     obs_hits_mb = (
                         mb_obs_st[:, :, :2]
                         .unsqueeze(1).expand(mb_size, num_agents, _n_obs, 2)
                         .reshape(mb_size * num_agents, _n_obs, 2)
+                    ) if _n_obs > 0 else None
+                    obs_radii_mb = (
+                        mb_obs_st[:, :, 2]
+                        .unsqueeze(1).expand(mb_size, num_agents, _n_obs)
+                        .reshape(mb_size * num_agents, _n_obs)
                     ) if _n_obs > 0 else None
 
                     # Agent-Agent info
@@ -411,6 +422,7 @@ def train(
                     u_qp_flat = solve_affine_qp(
                         u_nom=u_nom_flat.detach(),
                         obs_hits=obs_hits_mb,
+                        obs_radii=obs_radii_mb,
                         agent_pos=states_flat[:, :2], agent_vel=states_flat[:, 2:4],
                         s=s_f, s_dot=sd_f,
                         other_agent_pos=mb_other_pos_flat,

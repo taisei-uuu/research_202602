@@ -144,7 +144,7 @@ class SwarmIntegrator:
 
     @property
     def edge_dim(self) -> int:
-        return 4
+        return 5
 
     @property
     def comm_radius(self) -> float:

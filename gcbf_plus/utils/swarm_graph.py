@@ -5,7 +5,9 @@ Each swarm is treated as a point mass with a bounding circle of radius
 r_swarm.  No rotation, no 9-point drone distances.
 
 Edge creation:  CoM distance < R_sensing(s) = comm_base * s
-Edge features (4D):  [Δpx, Δpy, Δvx, Δvy]
+Edge features (5D):  [Δpx, Δpy, Δvx, Δvy, dist_surface]
+  dist_surface = max(0, ||Δp|| - obs_radius) for obstacle edges, else 0.
+  Obstacle velocity is treated as 0 (Δvx, Δvy = 0 - agent_vel).
 """
 
 from __future__ import annotations
@@ -127,8 +129,20 @@ def build_swarm_graph_from_states(
 
     if s_idx.numel() > 0:
         delta_pos = all_states_cat[s_idx, :2] - agent_states[r_idx, :2]
-        delta_vel = all_states_cat[s_idx, 2:4] - agent_states[r_idx, 2:4]
-        edges = torch.cat([delta_pos, delta_vel], dim=-1)  # (E, 4)
+        # Obstacle nodes (type 2) have radius in slot [2], not velocity.
+        # Use 0 as obstacle velocity so Δv = -agent_vel.
+        is_obs = node_type_vec[s_idx] == 2
+        vel_src = all_states_cat[s_idx, 2:4].clone()
+        vel_src[is_obs] = 0.0
+        delta_vel = vel_src - agent_states[r_idx, 2:4]
+        # 5th feature: surface distance for obstacle edges, 0 otherwise
+        dist_surface = torch.zeros(s_idx.shape[0], 1, device=device)
+        if is_obs.any():
+            obs_r = all_states_cat[s_idx[is_obs], 2]   # radius stored at slot [2]
+            dist_surface[is_obs, 0] = (
+                delta_pos[is_obs].norm(dim=-1) - obs_r
+            ).clamp(min=0.0)
+        edges = torch.cat([delta_pos, delta_vel, dist_surface], dim=-1)  # (E, 5)
     else:
         s_idx = torch.zeros(0, dtype=torch.long, device=device)
         r_idx = torch.zeros(0, dtype=torch.long, device=device)
@@ -239,9 +253,10 @@ def build_vectorized_swarm_graph(
         if b_idx.numel() > 0:
             dpos = agent_states[b_idx, s_idx, :2] - agent_states[b_idx, r_idx, :2]
             dvel = agent_states[b_idx, s_idx, 2:4] - agent_states[b_idx, r_idx, 2:4]
+            zeros5 = torch.zeros(b_idx.shape[0], 1, device=device)
             senders_parts.append(s_idx + b_idx * N_per)
             receivers_parts.append(r_idx + b_idx * N_per)
-            edges_parts.append(torch.cat([dpos, dvel], dim=-1))
+            edges_parts.append(torch.cat([dpos, dvel, zeros5], dim=-1))
 
     # Non-agent → Agent edges
     pos_na = non_agent[:, :, :2]           # (B, K, 2)
@@ -268,10 +283,21 @@ def build_vectorized_swarm_graph(
     b_na, k_na, a_na = torch.where(na_mask)
     if b_na.numel() > 0:
         dpos = non_agent[b_na, k_na, :2] - agent_states[b_na, a_na, :2]
-        dvel = non_agent[b_na, k_na, 2:4] - agent_states[b_na, a_na, 2:4]
+        # k_na >= n → obstacle node: radius is in slot [2], velocity = 0
+        is_obs = k_na >= n
+        vel_src = non_agent[b_na, k_na, 2:4].clone()
+        vel_src[is_obs] = 0.0
+        dvel = vel_src - agent_states[b_na, a_na, 2:4]
+        # 5th feature: surface distance for obstacle edges, 0 for goal edges
+        dist_surface = torch.zeros(b_na.shape[0], 1, device=device)
+        if is_obs.any():
+            obs_r = non_agent[b_na[is_obs], k_na[is_obs], 2]  # radius at slot [2]
+            dist_surface[is_obs, 0] = (
+                dpos[is_obs].norm(dim=-1) - obs_r
+            ).clamp(min=0.0)
         senders_parts.append((n + k_na) + b_na * N_per)
         receivers_parts.append(a_na + b_na * N_per)
-        edges_parts.append(torch.cat([dpos, dvel], dim=-1))
+        edges_parts.append(torch.cat([dpos, dvel, dist_surface], dim=-1))
 
     # ---- Assemble ----
     if senders_parts:

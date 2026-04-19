@@ -50,7 +50,7 @@ env = SwarmIntegrator(num_agents=NUM_AGENTS, area_size=10.0, dt=0.03)
 check("state_dim == 4", env.state_dim == 4)
 check("action_dim == 3", env.action_dim == 3, f"got {env.action_dim}")
 check("node_dim == 3", env.node_dim == 3)
-check("edge_dim == 4", env.edge_dim == 4)
+check("edge_dim == 5", env.edge_dim == 5)
 
 # Reset
 env.reset(seed=42)
@@ -168,7 +168,7 @@ print("=" * 60)
 
 from gcbf_plus.nn import PolicyNetwork
 
-policy = PolicyNetwork(node_dim=3, edge_dim=4, action_dim=3, n_agents=NUM_AGENTS)
+policy = PolicyNetwork(node_dim=3, edge_dim=5, action_dim=3, n_agents=NUM_AGENTS)
 check(f"policy.action_dim == 3", policy.action_dim == 3)
 
 # Forward pass on single-instance graph
@@ -305,7 +305,8 @@ try:
         area_size=8.0,
         n_obs=1,
         num_steps=3,
-        batch_size=4,
+        n_env_train=4,
+        batch_size=8,
         horizon=4,
         lr_actor=1e-3,
         log_interval=1,

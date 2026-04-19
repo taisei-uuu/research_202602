@@ -34,6 +34,7 @@ def solve_affine_qp(
     u_nom: torch.Tensor,
     # Obstacle CBF data
     obs_hits: Optional[torch.Tensor] = None,
+    obs_radii: Optional[torch.Tensor] = None,
     agent_pos: Optional[torch.Tensor] = None,
     agent_vel: Optional[torch.Tensor] = None,
     s: Optional[torch.Tensor] = None,
@@ -263,17 +264,21 @@ def solve_affine_qp(
                     dp = agent_pos.unsqueeze(1) - obs_hits          # (N, n_obs, 2)
                     dist_sq = (dp * dp).sum(dim=-1)
 
-                    r_sw = R_form * s + r_margin
-                    safe_dist = r_sw.unsqueeze(1)                   # (N, 1)
+                    r_sw = R_form * s + r_margin                    # (N,)
+                    # safe_dist = swarm radius + obstacle radius
+                    if obs_radii is not None:
+                        safe_dist = r_sw.unsqueeze(1) + obs_radii  # (N, n_obs)
+                    else:
+                        safe_dist = r_sw.unsqueeze(1)              # (N, 1)
                     h_obs = dist_sq - safe_dist ** 2
 
-                    r_dot = R_form * s_dot
+                    r_dot = R_form * s_dot                          # (N,)
                     h_dot = 2.0 * (dp * agent_vel.unsqueeze(1)).sum(dim=-1) - 2.0 * safe_dist * r_dot.unsqueeze(1)
                     h_ddot_drift = 2.0 * agent_vel.pow(2).sum(dim=-1).unsqueeze(1) - 2.0 * r_dot.pow(2).unsqueeze(1)
 
                     A_cx = 2.0 * dp[..., 0]                         # (N, n_obs)
                     A_cy = 2.0 * dp[..., 1]
-                    A_as = (-2.0 * safe_dist * R_form).expand(-1, n_obs)
+                    A_as = -2.0 * safe_dist * R_form                # (N, n_obs)
                     A_vec = torch.stack([A_cx, A_cy, A_as], dim=-1) # (N, n_obs, 3)
 
                     rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h_obs
