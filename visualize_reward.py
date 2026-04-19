@@ -65,7 +65,7 @@ def run_episode(args):
     ).to(dev)
 
     if args.checkpoint and os.path.exists(args.checkpoint):
-        ckpt = torch.load(args.checkpoint, map_location=dev)
+        ckpt = torch.load(args.checkpoint, map_location=dev, weights_only=False)
         state = ckpt.get("policy_net", ckpt.get("model_state_dict", ckpt))
         policy_net.load_state_dict(state)
         print(f"Checkpoint loaded: {args.checkpoint}")
