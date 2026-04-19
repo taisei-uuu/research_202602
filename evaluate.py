@@ -396,43 +396,14 @@ class GNNOnly(MethodController):
     def select_action(self, env, n_rays: int = 32):
         with torch.no_grad():
             graph = env._get_graph()
-            cfg = self.cfg
-
             pi_tanh = self.policy_net(graph)
-            a_max_gnn   = 1.0
-            a_max_gnn_s = 0.5
             pi_scaled = pi_tanh.clone()
-            pi_scaled[:, :2] *= a_max_gnn
-            pi_scaled[:, 2]  *= a_max_gnn_s
+            pi_scaled[:, :2] *= 1.0
+            pi_scaled[:, 2]  *= 0.5
             if self.no_scale:
                 pi_scaled[:, 2] = 0.0
-
-            pos           = env.agent_states[:, :2]
-            goal_pos      = env.goal_states[:, :2]
-            v_current     = env.agent_states[:, 2:4]
-            s_current     = env.scale_states[:, 0]
-            s_dot_current = env.scale_states[:, 1]
-
-            v_max_cfg = cfg.get("v_max", 1.0)
-            K_pos = cfg.get("K_pos", 0.5)
-            K_v   = cfg.get("K_v",   2.0)
-            K_s   = cfg.get("K_s",   2.0)
-            s_max = env.params.get("s_max", 1.5)
-
-            v_ref     = torch.clamp(K_pos * (goal_pos - pos), -v_max_cfg, v_max_cfg)
-            s_dot_ref = 1.0 * (s_max - s_current)
-            a_trans   = K_v * (v_ref - v_current) + pi_scaled[:, :2]
-            a_s       = K_s * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
-            u_nom     = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
-
-            _u_max = env.params.get("u_max")
-            if _u_max is not None:
-                a_max_t = _u_max * 0.7
-                a_max_s = _u_max * 0.3
-                u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
-                u_nom[:, 2]  = u_nom[:,  2].clamp(-a_max_s, a_max_s)
-
-            return u_nom  # QP なし
+            u = env.nominal_controller() + pi_scaled
+            return u  # QP なし
 
 
 @register_method

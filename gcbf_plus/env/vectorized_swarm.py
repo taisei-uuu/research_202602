@@ -41,10 +41,7 @@ class VectorizedSwarmEnv:
         "s_min": 0.4,
         "s_max": 1.5,
         "s_dot_max": 1.0,
-        # Hierarchical velocity-command gains
-        "K_pos": 0.5,          # proportional gain: goal_err → target velocity
-        "K_v": 2.0,            # PD gain: velocity error → acceleration (translation)
-        "K_s": 2.0,            # PD gain: velocity error → acceleration (scale)
+        "K_s": 2.0,            # scale PD gain (used by NominalController)
         # Payload parameters
         "cable_length": 1.0,
         "gravity": 9.81,

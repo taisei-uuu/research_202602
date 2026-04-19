@@ -33,7 +33,7 @@ import torch
 
 from gcbf_plus.env.vectorized_swarm import VectorizedSwarmEnv
 from gcbf_plus.nn import PolicyNetwork
-from gcbf_plus.algo.loss import compute_affine_loss
+from gcbf_plus.algo.reward import compute_reward
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
 from gcbf_plus.algo.nominal_controller import NominalController
 from gcbf_plus.utils.swarm_graph import build_vectorized_swarm_graph
@@ -56,7 +56,7 @@ def extract_agent_outputs(
 
 def train(
     num_agents: int = 1,
-    area_size: float = 15.0,
+    area_size: float = 10.0,
     n_obs: int = 6,
     num_steps: int = 10000,
     n_env_train: int = 32,
@@ -66,8 +66,8 @@ def train(
     lr_actor: float = 1e-4,
     coef_goal: float = 1.0,
     coef_qp: float = 2.0,
-    coef_effort: float = 0.3,
-    w_scale: float = 2.0,
+    coef_avoid: float = 1.0,
+    avoid_sigma: float = 1.5,
     coef_arrival: float = 5.0,
     arrival_radius: float = 0.3,
     max_grad_norm: float = 2.0,
@@ -151,8 +151,8 @@ def train(
     N_pool = horizon * n_env_train
 
     history: Dict[str, list] = {
-        "step": [], "loss/total": [], "loss/progress": [],
-        "loss/qp": [], "loss/effort": [],
+        "step": [], "reward/total": [], "reward/progress": [],
+        "reward/qp": [], "reward/avoid": [], "reward/arrival": [],
     }
 
     print("=" * 60)
@@ -163,7 +163,7 @@ def train(
     print(f"  State=4D  Action=3D(vel_cmd)  Edge=4D  Nodes/sample={N_per}")
     print(f"  R_form={R_form}  s_min={s_min}  s_max={s_max}")
     print(f"  Kp={nominal_ctrl.Kp}  Kd={nominal_ctrl.Kd}  K_s={nominal_ctrl.K_s}")
-    print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_effort={coef_effort}  w_scale={w_scale}")
+    print(f"  coef_progress={coef_goal}  coef_qp={coef_qp}  coef_avoid={coef_avoid}  avoid_sigma={avoid_sigma}")
     print(f"  coef_arrival={coef_arrival}  arrival_radius={arrival_radius}m")
     print(f"  use_payload={use_payload}")
     print("=" * 60)
@@ -448,16 +448,37 @@ def train(
                 dist_reduction_flat = (dist_now - dist_next).reshape(-1)         # (mb*n,)
                 dist_to_goal_flat = dist_now.reshape(-1).detach()                # (mb*n,) detached
 
-                loss, batch_info = compute_affine_loss(
+                # Obstacle info for R_avoid: expand per agent
+                _n_obs = mb_obs_st.shape[1]
+                if _n_obs > 0:
+                    obs_centers_flat = (
+                        mb_obs_st[:, :, :2]
+                        .unsqueeze(1).expand(mb_size, num_agents, _n_obs, 2)
+                        .reshape(mb_size * num_agents, _n_obs, 2)
+                    )
+                    obs_radii_flat = (
+                        mb_obs_st[:, :, 2]
+                        .unsqueeze(1).expand(mb_size, num_agents, _n_obs)
+                        .reshape(mb_size * num_agents, _n_obs)
+                    )
+                else:
+                    obs_centers_flat = None
+                    obs_radii_flat = None
+
+                loss, batch_info = compute_reward(
                     pi_action=pi_agents.reshape(-1, 3),
                     u_nom=u_nom_flat,
                     u_qp=u_qp_flat,
                     dist_reduction=dist_reduction_flat,
                     dist_to_goal=dist_to_goal_flat,
+                    agent_pos=mb_agent.reshape(-1, 4)[:, :2].detach(),
+                    agent_vel=mb_agent.reshape(-1, 4)[:, 2:4].detach(),
+                    obs_centers=obs_centers_flat,
+                    obs_radii=obs_radii_flat,
                     coef_progress=coef_goal,
                     coef_qp=coef_qp,
-                    coef_effort=coef_effort,
-                    w_scale=w_scale,
+                    coef_avoid=coef_avoid,
+                    avoid_sigma=avoid_sigma,
                     coef_arrival=coef_arrival,
                     arrival_radius=arrival_radius,
                 )
@@ -510,11 +531,10 @@ def train(
                 payload_str = f" | G: {mean_gamma:.2f}/{mean_gamma_limit:.2f} (max:{max_gamma:.2f}, p95:{p95_gamma:.2f}, v:{viol_rate:.2%})"
             else:
                 payload_str = " | G: (no payload)"
-            arrival_str = f"{avg_info.get('loss/arrival', 0.0):.4f}"
             pi_mean = avg_info.get("gnn/pi_mean", 0.0)
             pi_max  = avg_info.get("gnn/pi_max",  0.0)
             print(f"Step {step:5d} | "
-                  f"L: {avg_info['loss/total']:.4f} (qp:{avg_info['loss/qp']:.4f}, pr:{avg_info['loss/progress']:.4f}, ar:{arrival_str}, ef:{avg_info.get('loss/effort',0):.4f}) | "
+                  f"R: {avg_info['reward/total']:.4f} (qp:{avg_info['reward/qp']:.4f}, pr:{avg_info['reward/progress']:.4f}, ar:{avg_info.get('reward/arrival',0):.4f}, av:{avg_info.get('reward/avoid',0):.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
                   f"{payload_str}"
                   f" | GNN: {pi_mean:.3f}/{pi_max:.3f}")
@@ -575,7 +595,7 @@ def train(
 def main():
     parser = argparse.ArgumentParser(description="Train Hierarchical Velocity-Command Swarm Policy")
     parser.add_argument("--num_agents", type=int, default=1)
-    parser.add_argument("--area_size", type=float, default=15.0)
+    parser.add_argument("--area_size", type=float, default=10.0)
     parser.add_argument("--n_obs", type=int, default=6)
     parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--n_env_train", type=int, default=32)
@@ -585,8 +605,10 @@ def main():
     parser.add_argument("--lr_actor", type=float, default=1e-4)
     parser.add_argument("--coef_goal", type=float, default=1.0)
     parser.add_argument("--coef_qp", type=float, default=2.0)
-    parser.add_argument("--coef_effort", type=float, default=0.3)
-    parser.add_argument("--w_scale", type=float, default=2.0)
+    parser.add_argument("--coef_avoid", type=float, default=1.0,
+                        help="Proactive obstacle avoidance reward coefficient (default 1.0)")
+    parser.add_argument("--avoid_sigma", type=float, default=1.5,
+                        help="Distance scale [m] for exponential avoidance weight (default 1.5)")
     parser.add_argument("--coef_arrival", type=float, default=5.0,
                         help="Arrival bonus coefficient (default 5.0)")
     parser.add_argument("--arrival_radius", type=float, default=0.3,

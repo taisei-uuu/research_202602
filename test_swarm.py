@@ -267,22 +267,24 @@ print("\n" + "=" * 60)
 print(" 5. Affine Loss Function")
 print("=" * 60)
 
-from gcbf_plus.algo.loss import compute_affine_loss
+from gcbf_plus.algo.reward import compute_reward
 
 pi = torch.randn(N, 3, requires_grad=True)
-u_at_l = torch.randn(N, 3)
-u_qp_l = u_at_l + torch.randn(N, 3) * 0.1
-goal_d = torch.rand(N) * 5.0
+u_nom_l = torch.randn(N, 3)
+u_qp_l = u_nom_l + torch.randn(N, 3) * 0.1
+dist_red = torch.rand(N)
+dist_goal = torch.rand(N) * 5.0
 
-loss, info = compute_affine_loss(
-    pi_action=pi, u_at=u_at_l, u_qp=u_qp_l, goal_dist=goal_d,
+loss, info = compute_reward(
+    pi_action=pi, u_nom=u_nom_l, u_qp=u_qp_l,
+    dist_reduction=dist_red, dist_to_goal=dist_goal,
 )
 check("loss is scalar", loss.dim() == 0)
 check("loss is finite", torch.isfinite(loss).item())
-check("info has loss/total", "loss/total" in info)
-check("info has loss/goal", "loss/goal" in info)
-check("info has loss/qp", "loss/qp" in info)
-check("info has loss/reg", "loss/reg" in info)
+check("info has reward/total", "reward/total" in info)
+check("info has reward/progress", "reward/progress" in info)
+check("info has reward/qp", "reward/qp" in info)
+check("info has reward/avoid", "reward/avoid" in info)
 
 loss.backward()
 check("backprop through loss succeeds", pi.grad is not None)
@@ -312,8 +314,8 @@ try:
         device="cpu",
     )
     check("training loop completes", True)
-    check("history has loss/total", len(history.get("loss/total", [])) > 0)
-    losses = history.get("loss/total", [])
+    check("history has reward/total", len(history.get("reward/total", [])) > 0)
+    losses = history.get("reward/total", [])
     check("loss values are finite", all(np.isfinite(l) for l in losses),
           f"got {losses}")
 except Exception as e:
