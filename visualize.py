@@ -489,8 +489,8 @@ def run_simulation(
         K_s=env.params.get("K_s", 2.0) if is_swarm else 2.0,
     )
 
-    # GNN acceleration output scale (must match train_swarm.py)
-    a_max_gnn = 1.0    # m/s²
+    # GNN acceleration output scale (must match train_swarm.py --a_max_gnn, default 2.0)
+    a_max_gnn = 2.0    # m/s²
     a_max_gnn_s = 0.5  # s⁻²
 
     for step_idx in range(max_steps):

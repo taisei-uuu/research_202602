@@ -26,6 +26,7 @@ import torch
 from gcbf_plus.env import SwarmIntegrator
 from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
+from gcbf_plus.algo.nominal_controller import NominalController
 
 try:
     import quadprog
@@ -273,52 +274,44 @@ class AffinePolicy(MethodController):
     """Trained hierarchical velocity-command policy with analytical QP."""
     name = "affine_policy"
 
-    def __init__(self, policy_net, cfg, no_scale: bool = False, use_exact_qp: bool = False):
+    def __init__(self, policy_net, cfg, no_scale: bool = False, use_exact_qp: bool = False, a_max_gnn: float = 2.0):
         self.policy_net = policy_net
         self.cfg = cfg
         self.no_scale = no_scale
         self.use_exact_qp = use_exact_qp
+        self.a_max_gnn = a_max_gnn
+        self._nominal_ctrl = None  # 初回 select_action で env から生成
 
     def select_action(self, env, n_rays: int = 32):
         with torch.no_grad():
+            # NominalController を env パラメータから生成（訓練と同一）
+            if self._nominal_ctrl is None:
+                _u_max = env.params.get("u_max", 1.0)
+                self._nominal_ctrl = NominalController(
+                    comm_radius=env.params["comm_radius"],
+                    u_max=_u_max,
+                    u_max_scale=_u_max * 0.3,
+                    K_s_pos=env.params.get("K_s_pos", 1.0),
+                    K_s=env.params.get("K_s", 2.0),
+                )
+
             graph = env._get_graph()
-            cfg = self.cfg
 
             # GNN → tanh → scale to physical acceleration offset
             pi_tanh = self.policy_net(graph)  # (n, 3) already tanh'd
-            a_max_gnn   = 1.0   # m/s²
-            a_max_gnn_s = 0.5   # s⁻²
+            a_max_gnn_s = 0.5
             pi_scaled = pi_tanh.clone()
-            pi_scaled[:, :2] *= a_max_gnn
+            pi_scaled[:, :2] *= self.a_max_gnn
             pi_scaled[:, 2]  *= a_max_gnn_s
             if self.no_scale:
                 pi_scaled[:, 2] = 0.0
 
-            # PD nominal + GNN acceleration offset
-            pos       = env.agent_states[:, :2]
-            goal_pos  = env.goal_states[:, :2]
-            v_current = env.agent_states[:, 2:4]
-            s_current    = env.scale_states[:, 0]
-            s_dot_current = env.scale_states[:, 1]
-
-            v_max_cfg = cfg.get("v_max", 1.0)
-            K_pos = cfg.get("K_pos", 0.5)
-            K_v   = cfg.get("K_v",   2.0)
-            K_s   = cfg.get("K_s",   2.0)
-            s_max = env.params.get("s_max", 1.5)
-
-            v_ref     = torch.clamp(K_pos * (goal_pos - pos), -v_max_cfg, v_max_cfg)
-            s_dot_ref = 1.0 * (s_max - s_current)
-            a_trans   = K_v * (v_ref - v_current) + pi_scaled[:, :2]
-            a_s       = K_s * (s_dot_ref - s_dot_current) + pi_scaled[:, 2]
-            u_nom     = torch.cat([a_trans, a_s.unsqueeze(-1)], dim=-1)
+            # NominalController + GNN offset（訓練と同じパイプライン）
+            u_nom = self._nominal_ctrl(
+                env.agent_states, env.goal_states, env.scale_states,
+            ) + pi_scaled
 
             _u_max = env.params.get("u_max")
-            if _u_max is not None:
-                a_max_t = _u_max * 0.7
-                a_max_s = _u_max * 0.3
-                u_nom[:, :2] = u_nom[:, :2].clamp(-a_max_t, a_max_t)
-                u_nom[:, 2]  = u_nom[:,  2].clamp(-a_max_s, a_max_s)
 
             # QP — obstacle centers + agent-agent info
             sc = env.scale_states[:, 0]
@@ -661,6 +654,8 @@ def main():
                         help="Override arena size (default: use training config)")
     parser.add_argument("--seed_start", type=int, default=1000)
     parser.add_argument("--save_json", type=str, default="eval_results.json")
+    parser.add_argument("--a_max_gnn", type=float, default=2.0,
+                        help="GNN translation acceleration scale (must match training, default: 2.0)")
     args = parser.parse_args()
 
     if args.exact_qp:
@@ -709,7 +704,7 @@ def main():
 
         cls = METHOD_REGISTRY[mname]
         if mname == "affine_policy":
-            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp)
+            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp, a_max_gnn=args.a_max_gnn)
         elif mname == "gnn_only":
             method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale)
         elif mname == "hocbf_lqr":
