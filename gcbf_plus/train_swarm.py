@@ -504,9 +504,10 @@ def train(
 
                 optim.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_grad_norm)
                 optim.step()
 
+                batch_info["grad_norm"] = grad_norm.item()
                 epoch_losses.append(batch_info)
 
         # ============================================================
@@ -553,7 +554,8 @@ def train(
                   f"av:{avg_info.get('reward/avoid', 0) * coef_avoid:.4f}) | "
                   f"S: {mean_s:.2f} ({min_s:.2f}-{max_s:.2f})"
                   f"{payload_str}"
-                  f" | GNN: {pi_mean:.3f}/{pi_max:.3f}")
+                  f" | GNN: {pi_mean:.3f}/{pi_max:.3f}"
+                  f" | grad: {avg_info.get('grad_norm', 0):.3f}{'(clip)' if avg_info.get('grad_norm', 0) >= max_grad_norm * 0.95 else ''}")
             g_cnt = int(info.get("reset/goal", 0))
             c_cnt = int(info.get("reset/collision", 0))
             t_cnt = int(info.get("reset/timeout", 0))
