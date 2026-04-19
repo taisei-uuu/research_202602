@@ -10,6 +10,7 @@ Usage:
     python visualize_reward.py --checkpoint path.pt     # 学習済みチェックポイント
     python visualize_reward.py --seed 0                 # visualize.py --seed 0 と同じ環境
     python visualize_reward.py --max_steps 200          # エピソード長
+    python visualize_reward.py --exact_qp               # quadprog exact QP (visualize.py と同じ)
 """
 
 import argparse
@@ -24,6 +25,7 @@ from gcbf_plus.nn import PolicyNetwork
 from gcbf_plus.algo.reward import compute_reward
 from gcbf_plus.algo.affine_qp_solver import solve_affine_qp
 from gcbf_plus.algo.nominal_controller import NominalController
+from visualize import solve_affine_qp_exact, _QUADPROG_AVAILABLE
 
 
 def run_episode(args):
@@ -156,24 +158,44 @@ def run_episode(args):
             else:
                 other_pos = other_vel = other_s = other_sd = None
 
-            u_qp = solve_affine_qp(
-                u_nom=u_nom,
-                obs_hits=obs_hits_flat,
-                obs_radii=obs_radii_flat,
-                agent_pos=pos_flat, agent_vel=vel_flat,
-                s=s_flat, s_dot=s_dot_flat,
-                other_agent_pos=other_pos,
-                other_agent_vel=other_vel,
-                other_agent_s=other_s,
-                other_agent_s_dot=other_sd,
-                R_form=R_form, r_margin=r_margin, mass=mass,
-                s_min=s_min, s_max=s_max,
-                payload_states=None,
-                cable_length=cable_length, gravity=gravity,
-                gamma_min=gamma_min, gamma_max_full=gamma_max_full,
-                payload_damping=payload_damping,
-                u_max=u_max,
-            )
+            if args.exact_qp and _QUADPROG_AVAILABLE:
+                u_qp = solve_affine_qp_exact(
+                    u_nom=u_nom,
+                    obs_hits=obs_hits_flat,
+                    agent_pos=pos_flat, agent_vel=vel_flat,
+                    s=s_flat, s_dot=s_dot_flat,
+                    other_agent_pos=other_pos,
+                    other_agent_vel=other_vel,
+                    other_agent_s=other_s,
+                    other_agent_s_dot=other_sd,
+                    payload_states=None,
+                    R_form=R_form, r_margin=r_margin,
+                    s_min=s_min, s_max=s_max,
+                    cable_length=cable_length, gravity=gravity,
+                    payload_damping=payload_damping,
+                    u_max=u_max,
+                )
+            else:
+                if args.exact_qp and not _QUADPROG_AVAILABLE:
+                    print("  [WARNING] quadprog not installed — falling back to Dykstra QP")
+                u_qp = solve_affine_qp(
+                    u_nom=u_nom,
+                    obs_hits=obs_hits_flat,
+                    obs_radii=obs_radii_flat,
+                    agent_pos=pos_flat, agent_vel=vel_flat,
+                    s=s_flat, s_dot=s_dot_flat,
+                    other_agent_pos=other_pos,
+                    other_agent_vel=other_vel,
+                    other_agent_s=other_s,
+                    other_agent_s_dot=other_sd,
+                    R_form=R_form, r_margin=r_margin, mass=mass,
+                    s_min=s_min, s_max=s_max,
+                    payload_states=None,
+                    cable_length=cable_length, gravity=gravity,
+                    gamma_min=gamma_min, gamma_max_full=gamma_max_full,
+                    payload_damping=payload_damping,
+                    u_max=u_max,
+                )
 
             # 報酬計算 (step 前の距離を使う)
             pos_before = env.agent_states[:, :2].clone()
@@ -261,6 +283,8 @@ if __name__ == "__main__":
     parser.add_argument("--area_size",     type=float, default=10.0)
     parser.add_argument("--max_steps",     type=int,   default=512)
     parser.add_argument("--output",        type=str,   default="reward_episode.png")
+    parser.add_argument("--exact_qp",      action="store_true",
+                        help="exact QP solver (quadprog) — visualize.py と同じ")
     # 報酬係数 (train_swarm.py のデフォルトと揃えてある)
     parser.add_argument("--coef_progress", type=float, default=1.0)
     parser.add_argument("--coef_qp",       type=float, default=2.0)
