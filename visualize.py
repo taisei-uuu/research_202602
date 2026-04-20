@@ -160,7 +160,8 @@ def load_trained_policy(checkpoint_path: str):
 def _solve_qp_exact_single(
     u_nom_i,       # (3,) numpy float64
     s_i, sd_i,     # float
-    obs_hits_i,    # (K, 2) numpy — valid (filtered) obstacle hit points, or None
+    obs_hits_i,    # (K, 2) numpy — valid (filtered) obstacle centers, or None
+    obs_radii_i,   # (K,) numpy — radii of valid obstacles, or None
     agent_pos_i,   # (2,) numpy
     agent_vel_i,   # (2,) numpy
     other_pos,     # (M, 2) numpy or None
@@ -208,15 +209,17 @@ def _solve_qp_exact_single(
         a1, a2 = alpha1_obs, alpha2_obs
         r_sw = R_form * s_i + r_margin
         r_dot = R_form * sd_i
-        for obs_pt in obs_hits_i:
+        for k, obs_pt in enumerate(obs_hits_i):
+            r_obs = float(obs_radii_i[k]) if obs_radii_i is not None else 0.0
+            safe_dist = r_sw + r_obs
             dp = agent_pos_i - obs_pt
             dist_sq = float(np.dot(dp, dp))
-            h = dist_sq - r_sw ** 2
-            h_dot = 2.0 * float(np.dot(dp, agent_vel_i)) - 2.0 * r_sw * r_dot
+            h = dist_sq - safe_dist ** 2
+            h_dot = 2.0 * float(np.dot(dp, agent_vel_i)) - 2.0 * safe_dist * r_dot
             h_ddot_drift = 2.0 * float(np.dot(agent_vel_i, agent_vel_i)) - 2.0 * r_dot ** 2
             A_cx = 2.0 * dp[0]
             A_cy = 2.0 * dp[1]
-            A_as = -2.0 * r_sw * R_form
+            A_as = -2.0 * safe_dist * R_form
             rhs = h_ddot_drift + (a1 + a2) * h_dot + (a1 * a2) * h
             add([A_cx, A_cy, A_as, 0, 0], -rhs)
 
@@ -314,6 +317,7 @@ def solve_affine_qp_exact(
     payload_states,
     R_form, r_margin, s_min, s_max,
     cable_length, gravity, payload_damping,
+    obs_radii=None,
     slack_weight=100.0, u_max=None,
     alpha1_scale=2.0, alpha2_scale=2.0,
     alpha1_obs=0.8, alpha2_obs=0.8,
@@ -335,8 +339,10 @@ def solve_affine_qp_exact(
             hits_i = obs_hits[i].numpy()  # (nb, 2)
             valid = ~np.any(hits_i > 1e5, axis=-1)
             obs_i = hits_i[valid].astype(np.float64) if valid.any() else None
+            radii_i = obs_radii[i].numpy()[valid].astype(np.float64) if (obs_radii is not None and valid.any()) else None
         else:
             obs_i = None
+            radii_i = None
 
         # Other agents
         op = other_agent_pos[i].numpy().astype(np.float64) if other_agent_pos is not None else None
@@ -348,7 +354,7 @@ def solve_affine_qp_exact(
 
         sol_i = _solve_qp_exact_single(
             u_nom_i, s_i, sd_i,
-            obs_i, pos_i, vel_i,
+            obs_i, radii_i, pos_i, vel_i,
             op, ov, os_, osd,
             pay_i,
             R_form, r_margin, s_min, s_max,
@@ -594,6 +600,7 @@ def run_simulation(
                         cable_length=env.params["cable_length"],
                         gravity=env.params["gravity"],
                         payload_damping=env.params["payload_damping"],
+                        obs_radii=obs_radii_viz,
                         u_max=_qp_u_max,
                     )
                 else:
