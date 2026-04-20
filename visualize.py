@@ -503,7 +503,7 @@ def run_simulation(
                     env.agent_states, env.goal_states, env.scale_states,
                 )
 
-                if method == "affine_policy" and policy_net is not None:
+                if method in ("affine_policy", "gnn_only") and policy_net is not None:
                     # GNN → tanh → scale to physical acceleration offset
                     graph = env._get_graph()
                     pi_tanh = policy_net(graph)  # (n, 3) already tanh'd
