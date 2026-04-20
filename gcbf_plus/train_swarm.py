@@ -25,6 +25,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import time
 from typing import Dict
 
@@ -74,6 +76,7 @@ def train(
     log_interval: int = 100,
     seed: int = 0,
     checkpoint_path: str = "affine_swarm_checkpoint.pt",
+    log_path: str = None,
     device: str = "auto",
     use_payload: bool = False,
     no_scale: bool = False,
@@ -83,6 +86,10 @@ def train(
     """Train hierarchical velocity-command swarm policy."""
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    # ログファイルパス: 未指定なら checkpoint と同じディレクトリに .json で保存
+    if log_path is None:
+        log_path = os.path.splitext(checkpoint_path)[0] + "_log.json"
 
     if device == "auto":
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -573,6 +580,9 @@ def train(
                 if k != "step" and k in avg_info:
                     history[k].append(avg_info[k])
 
+            with open(log_path, "w") as _f:
+                json.dump(history, _f)
+
     print("=" * 60)
     print(f"  Training complete in {time.time() - t_start:.1f}s")
     print("=" * 60)
@@ -637,6 +647,8 @@ def main():
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=str, default="affine_swarm_checkpoint.pt")
+    parser.add_argument("--log_path", type=str, default=None,
+                        help="Training log JSON path (default: <checkpoint>_log.json)")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--use_payload", action="store_true", default=False,
                         help="Enable payload dynamics and HOCBF constraint")
