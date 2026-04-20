@@ -388,22 +388,37 @@ class GNNOnly(MethodController):
     """Trained GNN policy without QP safety filter (ablation: GNN only)."""
     name = "gnn_only"
 
-    def __init__(self, policy_net, cfg, no_scale: bool = False):
+    def __init__(self, policy_net, cfg, no_scale: bool = False, a_max_gnn: float = 2.0):
         self.policy_net = policy_net
         self.cfg = cfg
         self.no_scale = no_scale
+        self.a_max_gnn = a_max_gnn
+        self._nominal_ctrl = None
 
     def select_action(self, env):
         with torch.no_grad():
+            if self._nominal_ctrl is None:
+                _u_max = env.params.get("u_max", 1.0)
+                self._nominal_ctrl = NominalController(
+                    comm_radius=env.params["comm_radius"],
+                    u_max=_u_max,
+                    u_max_scale=_u_max * 0.3,
+                    K_s_pos=env.params.get("K_s_pos", 1.0),
+                    K_s=env.params.get("K_s", 2.0),
+                )
+
             graph = env._get_graph()
             pi_tanh = self.policy_net(graph)
             pi_scaled = pi_tanh.clone()
-            pi_scaled[:, :2] *= 1.0
+            pi_scaled[:, :2] *= self.a_max_gnn
             pi_scaled[:, 2]  *= 0.5
             if self.no_scale:
                 pi_scaled[:, 2] = 0.0
-            u = env.nominal_controller() + pi_scaled
-            return u  # QP なし
+
+            u_nom = self._nominal_ctrl(
+                env.agent_states, env.goal_states, env.scale_states,
+            )
+            return u_nom + pi_scaled  # QP なし
 
 
 @register_method
@@ -705,7 +720,7 @@ def main():
         if mname == "affine_policy":
             method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp, a_max_gnn=args.a_max_gnn)
         elif mname == "gnn_only":
-            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale)
+            method = cls(policy_net=policy_net, cfg=cfg, no_scale=args.no_scale, a_max_gnn=args.a_max_gnn)
         elif mname == "hocbf_lqr":
             method = cls(cfg=cfg, no_scale=args.no_scale, use_exact_qp=args.exact_qp)
         else:
