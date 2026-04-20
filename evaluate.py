@@ -322,11 +322,21 @@ class AffinePolicy(MethodController):
             n  = env.num_agents
 
             obs_st = env._obstacle_states  # (n_obs, 4) or None
-            obs_hits  = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
-            obs_radii = (
-                torch.tensor([o.radius for o in env._obstacles], dtype=torch.float32)
-                .unsqueeze(0).expand(n, -1)
-            ) if obs_st is not None else None
+            _comm_r = env.params["comm_radius"]
+            if obs_st is not None:
+                obs_centers = obs_st[:, :2]
+                dists = torch.cdist(pos, obs_centers)
+                in_range = dists < _comm_r
+                obs_hits_full = obs_centers.unsqueeze(0).expand(n, -1, 2).clone()
+                obs_hits_full[~in_range] = 1e6
+                obs_hits  = obs_hits_full
+                obs_radii = (
+                    torch.tensor([o.radius for o in env._obstacles], dtype=torch.float32)
+                    .unsqueeze(0).expand(n, -1)
+                )
+            else:
+                obs_hits = None
+                obs_radii = None
 
             if n > 1:
                 idx  = torch.arange(n)
@@ -444,11 +454,21 @@ class HOCBFWithLQR(MethodController):
             n   = env.num_agents
 
             obs_st = env._obstacle_states  # (n_obs, 4) or None
-            obs_hits  = obs_st[:, :2].unsqueeze(0).expand(n, -1, 2) if obs_st is not None else None
-            obs_radii = (
-                torch.tensor([o.radius for o in env._obstacles], dtype=torch.float32)
-                .unsqueeze(0).expand(n, -1)
-            ) if obs_st is not None else None
+            _comm_r = env.params["comm_radius"]
+            if obs_st is not None:
+                obs_centers = obs_st[:, :2]
+                dists = torch.cdist(pos, obs_centers)
+                in_range = dists < _comm_r
+                obs_hits_full = obs_centers.unsqueeze(0).expand(n, -1, 2).clone()
+                obs_hits_full[~in_range] = 1e6
+                obs_hits  = obs_hits_full
+                obs_radii = (
+                    torch.tensor([o.radius for o in env._obstacles], dtype=torch.float32)
+                    .unsqueeze(0).expand(n, -1)
+                )
+            else:
+                obs_hits = None
+                obs_radii = None
 
             if n > 1:
                 idx  = torch.arange(n)
