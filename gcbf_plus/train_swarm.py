@@ -182,6 +182,12 @@ def train(
     }
     interval_losses = []  # log_interval 分のミニバッチ結果を蓄積
 
+    # log_interval 分のリセット統計累積カウンタ
+    iv_goal = 0
+    iv_col  = 0
+    iv_to   = 0
+    iv_reset = 0
+
     for step in range(1, num_steps + 1):
 
         # ============================================================
@@ -322,6 +328,10 @@ def train(
             info["reset/goal"]      = goal_count
             info["reset/collision"] = collision_count
             info["reset/timeout"]   = timeout_count
+            iv_goal  += goal_count
+            iv_col   += collision_count
+            iv_to    += timeout_count
+            iv_reset += reset_count
 
         # ============================================================
         # PHASE 2: Flatten pool → (N_pool, n, ...) and shuffle
@@ -566,15 +576,14 @@ def train(
                   f"{payload_str}"
                   f" | GNN: {pi_mean:.3f}/{pi_max:.3f}"
                   f" | grad: {avg_info.get('grad_norm', 0):.3f}{'(clip)' if avg_info.get('grad_norm', 0) >= max_grad_norm * 0.95 else ''}")
-            g_cnt = int(info.get("reset/goal", 0))
-            c_cnt = int(info.get("reset/collision", 0))
-            t_cnt = int(info.get("reset/timeout", 0))
-            total_resets = g_cnt + c_cnt + t_cnt or 1  # avoid div/0
+            total_resets = iv_goal + iv_col + iv_to or 1
+            iv_reset_rate = iv_reset / (log_interval * n_env_train * horizon)
             print(f"      Life: {info.get('life/avg', 0.0):.1f} ({info.get('life/min', 0.0):.0f}-{info.get('life/max', 0.0):.0f}) | "
-                  f"Reset: {info.get('life/reset_rate', 0.0):.1%} "
-                  f"[Goal:{g_cnt}({g_cnt/total_resets:.0%}) "
-                  f"Col:{c_cnt}({c_cnt/total_resets:.0%}) "
-                  f"TO:{t_cnt}({t_cnt/total_resets:.0%})] | {elapsed:.0f}s")
+                  f"Reset: {iv_reset_rate:.1%} "
+                  f"[Goal:{iv_goal}({iv_goal/total_resets:.0%}) "
+                  f"Col:{iv_col}({iv_col/total_resets:.0%}) "
+                  f"TO:{iv_to}({iv_to/total_resets:.0%})] | {elapsed:.0f}s")
+            iv_goal = iv_col = iv_to = iv_reset = 0
             history["step"].append(step)
             for k in history:
                 if k != "step" and k in avg_info:
