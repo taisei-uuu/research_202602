@@ -412,7 +412,7 @@ def run_simulation(
         r_margin = cfg.get("r_margin", 0.2)
         s_min = cfg.get("s_min", 0.4)
         s_max = cfg.get("s_max", 1.5)
-        if force_lqr or method != "affine_policy":
+        if force_lqr or method not in ("affine_policy", "gnn_only"):
             policy_net = None
             if force_lqr:
                 print("  [force_lqr] Ignoring trained policy — using LQR only")
