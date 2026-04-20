@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from typing import Any, Dict, List, Optional, Type
 from abc import ABC, abstractmethod
@@ -169,12 +170,15 @@ def _solve_qp_exact_single(
         add([0, 0, 0, 1, 0], 0.0)
         add([0, 0, 0, 0, 1], 0.0)
 
-    # Box constraint on translation
+    # Box constraint on translation.
+    # Use u_max/sqrt(2) so the worst-case diagonal output has norm ≤ u_max,
+    # matching the env's norm-based clamp and preserving CBF guarantees.
     if u_max is not None:
-        add([ 1, 0, 0, 0, 0], -u_max)
-        add([-1, 0, 0, 0, 0], -u_max)
-        add([ 0, 1, 0, 0, 0], -u_max)
-        add([ 0,-1, 0, 0, 0], -u_max)
+        u_max_qp = u_max / math.sqrt(2)
+        add([ 1, 0, 0, 0, 0], -u_max_qp)
+        add([-1, 0, 0, 0, 0], -u_max_qp)
+        add([ 0, 1, 0, 0, 0], -u_max_qp)
+        add([ 0,-1, 0, 0, 0], -u_max_qp)
 
     C_mat = np.array(C_rows, dtype=np.float64).T  # (5, n_constraints)
     b_vec = np.array(b_vals, dtype=np.float64)
