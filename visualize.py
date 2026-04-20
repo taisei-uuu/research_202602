@@ -540,15 +540,22 @@ def run_simulation(
                 ps        = env.payload_states if _use_payload else None
 
                 # Obstacle centers/radii per agent: (n_obs, 2/1) → (num_agents, n_obs, 2/1)
+                # Filter by comm_radius so agents only react to obstacles within sensing range
                 n_obs_env = env._obstacle_states.shape[0] if env._obstacle_states is not None else 0
-                obs_hits = (
-                    env._obstacle_states[:, :2]
-                    .unsqueeze(0).expand(num_agents, n_obs_env, 2)
-                ) if n_obs_env > 0 else None
-                obs_radii_viz = (
-                    torch.tensor([obs.radius for obs in env._obstacles], dtype=torch.float32)
-                    .unsqueeze(0).expand(num_agents, n_obs_env)
-                ) if n_obs_env > 0 else None
+                if n_obs_env > 0:
+                    obs_centers = env._obstacle_states[:, :2]  # (n_obs, 2)
+                    dists = torch.cdist(pos, obs_centers)       # (num_agents, n_obs)
+                    in_range = dists < comm_radius              # (num_agents, n_obs)
+                    obs_hits_full = obs_centers.unsqueeze(0).expand(num_agents, n_obs_env, 2).clone()
+                    obs_hits_full[~in_range] = 1e6              # mask out-of-range as sentinel
+                    obs_hits = obs_hits_full
+                    obs_radii_viz = (
+                        torch.tensor([obs.radius for obs in env._obstacles], dtype=torch.float32)
+                        .unsqueeze(0).expand(num_agents, n_obs_env)
+                    )
+                else:
+                    obs_hits = None
+                    obs_radii_viz = None
 
                 # Agent-Agent info
                 if num_agents > 1:
